@@ -110,13 +110,20 @@ export interface SmartSection {
   items: string[];
 }
 
+export interface SmartDragDropCard {
+  id: string;
+  title: string;
+  imageUrl: string;
+}
+
 export interface SmartConvertedActivity {
-  mode: 'flashcards' | 'quiz' | 'adhkar' | 'story' | 'checklist';
+  mode: 'flashcards' | 'quiz' | 'adhkar' | 'story' | 'checklist' | 'drag_drop_images';
   verbatimTextBlocks: string[];
   sections: SmartSection[];
   flashcards: SmartFlashcard[];
   quizQuestions: SmartQuizQuestion[];
   matchingPairs?: SmartMatchingPair[];
+  dragDropCards?: SmartDragDropCard[];
   drawingPrompt?: string;
 }
 

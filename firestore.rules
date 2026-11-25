@@ -1,0 +1,284 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'noor.mohamed.hachimi@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // Validation blueprint: PlatformAppearance
+    function isValidAppearance(data) {
+      return data.keys().hasAll([
+        'themePreset',
+        'primaryAccent',
+        'columns',
+        'viewMode',
+        'cardStyle',
+        'fontSize',
+        'showCategoriesBar',
+        'showFeaturedSection',
+        'showChannelLinks',
+        'showOriginalPdfButton',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'themePreset',
+        'primaryAccent',
+        'columns',
+        'viewMode',
+        'cardStyle',
+        'fontSize',
+        'showCategoriesBar',
+        'showFeaturedSection',
+        'showChannelLinks',
+        'showOriginalPdfButton',
+        'updatedAt'
+      ]) &&
+      data.themePreset is string &&
+      data.themePreset.size() <= 20 &&
+      data.themePreset in ['daylight', 'ocean', 'evening', 'emirati'] &&
+      data.primaryAccent is string &&
+      data.primaryAccent.size() == 7 &&
+      data.primaryAccent.matches('^#[0-9a-fA-F]{6}$') &&
+      data.columns is int &&
+      (data.columns == 2 || data.columns == 3) &&
+      data.viewMode is string &&
+      data.viewMode.size() <= 10 &&
+      data.viewMode in ['grid', 'list'] &&
+      data.cardStyle is string &&
+      data.cardStyle.size() <= 12 &&
+      data.cardStyle in ['rounded', 'circle', 'compact'] &&
+      data.fontSize is string &&
+      data.fontSize.size() <= 12 &&
+      data.fontSize in ['normal', 'large', 'xlarge'] &&
+      data.showCategoriesBar is bool &&
+      data.showFeaturedSection is bool &&
+      data.showChannelLinks is bool &&
+      data.showOriginalPdfButton is bool &&
+      data.updatedAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    // Validation blueprint: EducationalMaterial
+    function isValidMaterial(data, materialId) {
+      return data.keys().hasAll([
+        'id',
+        'title',
+        'category',
+        'activityType',
+        'accentColor',
+        'themeMotif',
+        'published',
+        'featured',
+        'order',
+        'ownerId',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'title',
+        'subtitle',
+        'author',
+        'category',
+        'activityType',
+        'accentColor',
+        'themeMotif',
+        'published',
+        'featured',
+        'order',
+        'sourceUrl',
+        'sourceMimeType',
+        'sourceFileName',
+        'externalLinks',
+        'qaItems',
+        'dhikrItems',
+        'storyChapters',
+        'storyLessonsIntro',
+        'storyLessonsHeading',
+        'storyLessons',
+        'problemSolution',
+        'smartActivity',
+        'ownerId',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.id == materialId &&
+      isValidId(data.id) &&
+      data.title is string &&
+      data.title.size() >= 1 &&
+      data.title.size() <= 300 &&
+      (!('subtitle' in data) || (data.subtitle is string && data.subtitle.size() <= 400)) &&
+      (!('author' in data) || (data.author is string && data.author.size() <= 200)) &&
+      data.category is string &&
+      data.category.size() >= 1 &&
+      data.category.size() <= 120 &&
+      data.activityType is string &&
+      data.activityType.size() <= 32 &&
+      data.activityType in [
+        'qa_flashcards',
+        'aqeedah_activities_pack',
+        'adhkar_cards',
+        'story_chapters',
+        'problem_solution_guide',
+        'smart_cards'
+      ] &&
+      data.accentColor is string &&
+      data.accentColor.size() == 7 &&
+      data.accentColor.matches('^#[0-9a-fA-F]{6}$') &&
+      data.themeMotif is string &&
+      data.themeMotif.size() <= 24 &&
+      data.themeMotif in ['ocean', 'activities', 'morning', 'evening', 'desert', 'guide'] &&
+      data.published is bool &&
+      data.featured is bool &&
+      data.order is int &&
+      data.order >= 0 &&
+      data.order <= 10000 &&
+      (!('sourceUrl' in data) || (data.sourceUrl is string && data.sourceUrl.size() <= 1000)) &&
+      (!('sourceMimeType' in data) || (data.sourceMimeType is string && data.sourceMimeType.size() <= 100)) &&
+      (!('sourceFileName' in data) || (data.sourceFileName is string && data.sourceFileName.size() <= 260)) &&
+      (!('externalLinks' in data) || (data.externalLinks is list && data.externalLinks.size() <= 10 && (data.externalLinks.size() == 0 || data.externalLinks[0] is map))) &&
+      (!('qaItems' in data) || (data.qaItems is list && data.qaItems.size() <= 100 && (data.qaItems.size() == 0 || data.qaItems[0] is map))) &&
+      (!('dhikrItems' in data) || (data.dhikrItems is list && data.dhikrItems.size() <= 100 && (data.dhikrItems.size() == 0 || data.dhikrItems[0] is map))) &&
+      (!('storyChapters' in data) || (data.storyChapters is list && data.storyChapters.size() <= 30 && (data.storyChapters.size() == 0 || data.storyChapters[0] is map))) &&
+      (!('storyLessonsIntro' in data) || (data.storyLessonsIntro is string && data.storyLessonsIntro.size() <= 2000)) &&
+      (!('storyLessonsHeading' in data) || (data.storyLessonsHeading is string && data.storyLessonsHeading.size() <= 300)) &&
+      (!('storyLessons' in data) || (data.storyLessons is list && data.storyLessons.size() <= 50 && (data.storyLessons.size() == 0 || data.storyLessons[0] is map))) &&
+      (!('problemSolution' in data) || data.problemSolution is map) &&
+      (!('smartActivity' in data) || data.smartActivity is map) &&
+      isValidId(data.ownerId) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp &&
+      data.updatedAt == request.time;
+    }
+
+    function isValidAdminDoc(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        data.uid == uid &&
+        isValidId(data.uid) &&
+        data.email is string &&
+        data.email.size() >= 3 &&
+        data.email.size() <= 320 &&
+        data.createdAt is timestamp &&
+        data.createdAt == request.time;
+    }
+
+    // Platform appearance & layout settings
+    match /platform_config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if false;
+      allow create: if isVerified() && isValidId(configId) && configId == 'appearance' && isValidAppearance(incoming()) && isAdmin();
+      allow update: if isVerified() && isValidId(configId) && configId == 'appearance' && isValidAppearance(incoming()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'themePreset',
+          'primaryAccent',
+          'columns',
+          'viewMode',
+          'cardStyle',
+          'fontSize',
+          'showCategoriesBar',
+          'showFeaturedSection',
+          'showChannelLinks',
+          'showOriginalPdfButton',
+          'updatedAt'
+        ]) && isAdmin();
+      allow delete: if false;
+    }
+
+    // Educational materials collection (real-time synced across Vercel & Firebase)
+    match /materials/{materialId} {
+      allow get: if isValidId(materialId) && (existing().published == true || isAdmin());
+      allow list: if resource.data.published == true || isBootstrappedAdmin();
+      allow create: if isVerified() &&
+        isValidId(materialId) &&
+        isValidMaterial(incoming(), materialId) &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if isVerified() &&
+        isValidId(materialId) &&
+        isValidMaterial(incoming(), materialId) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt && (
+          // Action: Toggle publish status
+          incoming().diff(existing()).affectedKeys().hasOnly(['published', 'updatedAt']) ||
+          // Action: Toggle featured status
+          incoming().diff(existing()).affectedKeys().hasOnly(['featured', 'updatedAt']) ||
+          // Action: Reorder material
+          incoming().diff(existing()).affectedKeys().hasOnly(['order', 'updatedAt']) ||
+          // Action: Full metadata / content edit by admin
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title',
+            'subtitle',
+            'author',
+            'category',
+            'activityType',
+            'accentColor',
+            'themeMotif',
+            'published',
+            'featured',
+            'order',
+            'sourceUrl',
+            'sourceMimeType',
+            'sourceFileName',
+            'externalLinks',
+            'qaItems',
+            'dhikrItems',
+            'storyChapters',
+            'storyLessonsIntro',
+            'storyLessonsHeading',
+            'storyLessons',
+            'problemSolution',
+            'smartActivity',
+            'updatedAt'
+          ])
+        ) &&
+        isAdmin();
+      allow delete: if isVerified() && isValidId(materialId) && isAdmin();
+    }
+
+    // Admin directory
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && isVerified() && (request.auth.uid == uid || isBootstrappedAdmin());
+      allow list: if false;
+      allow create: if isBootstrappedAdmin() && isValidId(uid) && isValidAdminDoc(incoming(), uid);
+      allow update: if isBootstrappedAdmin() && isValidId(uid) && isValidAdminDoc(incoming(), uid) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+      allow delete: if isBootstrappedAdmin() && isValidId(uid);
+    }
+  }
+}

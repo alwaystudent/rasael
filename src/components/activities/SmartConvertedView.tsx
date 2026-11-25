@@ -1,21 +1,36 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   Check,
   CheckCircle2,
   Eye,
   EyeOff,
+  HelpCircle,
+  Layers,
+  Palette,
   RotateCcw,
+  Sparkles,
 } from 'lucide-react';
 import type { SmartConvertedActivity } from '../../types/platform.ts';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 interface Props {
   activity: SmartConvertedActivity;
   accentColor: string;
+  soundEnabled?: boolean;
+  onComplete?: () => void;
 }
 
-export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) => {
+const OPTION_LETTERS = ['أ', 'ب', 'ج', 'د', 'هـ', 'و'];
+
+export const SmartConvertedView: React.FC<Props> = ({
+  activity,
+  accentColor,
+  soundEnabled = true,
+  onComplete,
+}) => {
   const hasFlashcards = activity.flashcards.length > 0;
   const hasQuiz = activity.quizQuestions.length > 0;
   const hasMatching = (activity.matchingPairs?.length || 0) > 0;
@@ -32,6 +47,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
   const [tab, setTab] = useState<'flashcards' | 'quiz' | 'matching' | 'sections'>(initialTab);
   const [cardIdx, setCardIdx] = useState(0);
   const [revealed, setRevealed] = useState(false);
+  const [revealedCardIds, setRevealedCardIds] = useState<Record<string, boolean>>({});
 
   const [quizIdx, setQuizIdx] = useState(0);
   const [pickedOpt, setPickedOpt] = useState<number | null>(null);
@@ -42,6 +58,58 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
   const [matches, setMatches] = useState<Record<string, string>>({});
 
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
+  const completionFiredRef = useRef(false);
+
+  // Shuffle right-hand matching options deterministically without modifying any text
+  const shuffledRightPairs = useMemo(() => {
+    const pairs = activity.matchingPairs || [];
+    if (pairs.length <= 1) return pairs;
+    const copy = [...pairs];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = (i * 7 + 3) % (i + 1);
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    if (copy.every((p, idx) => p.id === pairs[idx]?.id)) {
+      const [first, ...rest] = copy;
+      return [...rest, first];
+    }
+    return copy;
+  }, [activity.matchingPairs]);
+
+  const matchedCorrectCount = useMemo(() => {
+    const pairs = activity.matchingPairs || [];
+    return pairs.filter((p) => matches[p.id] === p.right).length;
+  }, [activity.matchingPairs, matches]);
+
+  const totalSectionItems = useMemo(
+    () => activity.sections.reduce((acc, s) => acc + s.items.length, 0),
+    [activity.sections]
+  );
+  const checkedSectionCount = Object.values(checkedItems).filter(Boolean).length;
+  const revealedCardCount = Object.values(revealedCardIds).filter(Boolean).length;
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    const allCardsDone = hasFlashcards && revealedCardCount === activity.flashcards.length;
+    const allMatchingDone =
+      hasMatching && matchedCorrectCount === (activity.matchingPairs?.length || 0);
+    const allSectionsDone = totalSectionItems > 0 && checkedSectionCount === totalSectionItems;
+    if (quizDone || allCardsDone || allMatchingDone || allSectionsDone) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [
+    quizDone,
+    hasFlashcards,
+    revealedCardCount,
+    activity.flashcards.length,
+    hasMatching,
+    matchedCorrectCount,
+    activity.matchingPairs,
+    totalSectionItems,
+    checkedSectionCount,
+    onComplete,
+  ]);
 
   const currentCard = activity.flashcards[cardIdx];
   const currentQuiz = activity.quizQuestions[quizIdx];
@@ -54,56 +122,60 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
           <button
             type="button"
             onClick={() => setTab('flashcards')}
-            className={`px-4 py-2 text-sm font-semibold rounded-xl transition-colors whitespace-nowrap ${
+            className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
               tab === 'flashcards'
                 ? 'text-white shadow-sm'
-                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)]'
+                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)] hover:opacity-90'
             }`}
             style={tab === 'flashcards' ? { backgroundColor: accentColor } : undefined}
           >
-            البطاقات التفاعلية ({activity.flashcards.length})
+            <Layers className="w-4 h-4" />
+            <span>البطاقات التفاعلية ({activity.flashcards.length})</span>
           </button>
         )}
         {hasQuiz && (
           <button
             type="button"
             onClick={() => setTab('quiz')}
-            className={`px-4 py-2 text-sm font-semibold rounded-xl transition-colors whitespace-nowrap ${
+            className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
               tab === 'quiz'
                 ? 'text-white shadow-sm'
-                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)]'
+                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)] hover:opacity-90'
             }`}
             style={tab === 'quiz' ? { backgroundColor: accentColor } : undefined}
           >
-            اختبار ({activity.quizQuestions.length})
+            <HelpCircle className="w-4 h-4" />
+            <span>اختبار ({activity.quizQuestions.length})</span>
           </button>
         )}
         {hasMatching && (
           <button
             type="button"
             onClick={() => setTab('matching')}
-            className={`px-4 py-2 text-sm font-semibold rounded-xl transition-colors whitespace-nowrap ${
+            className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
               tab === 'matching'
                 ? 'text-white shadow-sm'
-                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)]'
+                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)] hover:opacity-90'
             }`}
             style={tab === 'matching' ? { backgroundColor: accentColor } : undefined}
           >
-            التوصيل ({activity.matchingPairs?.length})
+            <Sparkles className="w-4 h-4" />
+            <span>التوصيل ({activity.matchingPairs?.length})</span>
           </button>
         )}
         {hasSections && (
           <button
             type="button"
             onClick={() => setTab('sections')}
-            className={`px-4 py-2 text-sm font-semibold rounded-xl transition-colors whitespace-nowrap ${
+            className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
               tab === 'sections'
                 ? 'text-white shadow-sm'
-                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)]'
+                : 'bg-[var(--platform-surface-muted)] text-[var(--platform-text)] hover:opacity-90'
             }`}
             style={tab === 'sections' ? { backgroundColor: accentColor } : undefined}
           >
-            المحتوى الكامل
+            <BookOpen className="w-4 h-4" />
+            <span>المحتوى الكامل</span>
           </button>
         )}
       </div>
@@ -111,31 +183,53 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
       {/* Flashcards */}
       {tab === 'flashcards' && currentCard && (
         <div className="space-y-6">
+          <div className="mx-auto max-w-2xl space-y-2">
+            <div className="flex items-center justify-between text-xs font-bold text-[var(--platform-text-muted)] tabular-nums">
+              <span>
+                {cardIdx + 1} / {activity.flashcards.length}
+              </span>
+              <span>{Math.round(((cardIdx + 1) / activity.flashcards.length) * 100)}%</span>
+            </div>
+            <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--platform-surface-muted)]">
+              <div
+                className="h-full rounded-full transition-all duration-300"
+                style={{
+                  width: `${((cardIdx + 1) / activity.flashcards.length) * 100}%`,
+                  backgroundColor: accentColor,
+                }}
+              />
+            </div>
+          </div>
+
           <div
-            className="mx-auto max-w-xl rounded-3xl border-4 bg-white p-8 sm:p-10 text-center text-slate-900 space-y-6"
+            className="mx-auto max-w-2xl rounded-3xl border-4 bg-white p-8 sm:p-10 text-center text-slate-900 shadow-sm space-y-6"
             style={{ borderColor: accentColor }}
           >
-            <div className="text-sm font-bold text-slate-500 tabular-nums">
-              {cardIdx + 1} / {activity.flashcards.length}
-            </div>
             <h3 className="font-amiri text-2xl sm:text-3xl font-bold leading-relaxed">
               {currentCard.front}
             </h3>
 
             {revealed ? (
-              <div className="rounded-2xl bg-sky-50 border border-sky-200 p-5 font-amiri text-2xl font-bold text-slate-900">
+              <div className="rounded-2xl bg-sky-50 border-2 border-sky-200 p-5 font-amiri text-2xl font-bold text-slate-900 leading-relaxed">
                 {currentCard.back}
               </div>
             ) : (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-slate-400">
+              <div className="rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-2xl font-bold text-slate-400">
                 ؟
               </div>
             )}
 
             <button
               type="button"
-              onClick={() => setRevealed((r) => !r)}
-              className="inline-flex items-center gap-2 rounded-xl px-6 py-3 font-bold text-white"
+              onClick={() => {
+                const next = !revealed;
+                setRevealed(next);
+                if (next) {
+                  playSoftChime('tap', soundEnabled);
+                  setRevealedCardIds((prev) => ({ ...prev, [currentCard.id]: true }));
+                }
+              }}
+              className="inline-flex items-center gap-2 rounded-2xl px-7 py-3.5 font-extrabold text-white shadow-xs transition-transform hover:-translate-y-0.5 active:scale-[0.98]"
               style={{ backgroundColor: accentColor }}
             >
               {revealed ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
@@ -143,7 +237,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
             </button>
           </div>
 
-          <div className="flex items-center justify-between">
+          <div className="mx-auto max-w-2xl flex items-center justify-between">
             <button
               type="button"
               disabled={cardIdx === 0}
@@ -151,7 +245,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                 setCardIdx((i) => i - 1);
                 setRevealed(false);
               }}
-              className="inline-flex items-center gap-2 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] px-5 py-3 text-sm font-bold disabled:opacity-40"
             >
               <ArrowRight className="w-4 h-4" />
               <span>السابق</span>
@@ -163,7 +257,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                 setCardIdx((i) => i + 1);
                 setRevealed(false);
               }}
-              className="inline-flex items-center gap-2 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] px-5 py-3 text-sm font-bold disabled:opacity-40"
             >
               <span>التالي</span>
               <ArrowLeft className="w-4 h-4" />
@@ -174,11 +268,11 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
 
       {/* Quiz */}
       {tab === 'quiz' && currentQuiz && (
-        <div className="mx-auto max-w-xl rounded-3xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 sm:p-8 space-y-6">
+        <div className="mx-auto max-w-2xl rounded-3xl border-2 border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 sm:p-8 space-y-6">
           {quizDone ? (
-            <div className="text-center space-y-5">
-              <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto" />
-              <div className="text-3xl font-extrabold tabular-nums">
+            <div className="text-center space-y-5 py-4">
+              <CheckCircle2 className="w-14 h-14 text-emerald-600 mx-auto" />
+              <div className="text-4xl font-extrabold tabular-nums">
                 {quizScore} / {activity.quizQuestions.length}
               </div>
               <button
@@ -189,7 +283,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                   setQuizScore(0);
                   setQuizDone(false);
                 }}
-                className="inline-flex items-center gap-2 rounded-xl px-6 py-3 font-bold text-white"
+                className="inline-flex items-center gap-2 rounded-2xl px-6 py-3 font-bold text-white"
                 style={{ backgroundColor: accentColor }}
               >
                 <RotateCcw className="w-4 h-4" />
@@ -198,16 +292,27 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
             </div>
           ) : (
             <>
-              <div className="flex items-center justify-between text-sm text-[var(--platform-text-muted)] tabular-nums">
-                <span>
-                  {quizIdx + 1} / {activity.quizQuestions.length}
-                </span>
-                <span>
-                  {quizScore} / {activity.quizQuestions.length}
-                </span>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm font-bold text-[var(--platform-text-muted)] tabular-nums">
+                  <span>
+                    {quizIdx + 1} / {activity.quizQuestions.length}
+                  </span>
+                  <span>
+                    {quizScore} / {activity.quizQuestions.length}
+                  </span>
+                </div>
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--platform-surface-muted)]">
+                  <div
+                    className="h-full rounded-full transition-all duration-300"
+                    style={{
+                      width: `${((quizIdx + 1) / activity.quizQuestions.length) * 100}%`,
+                      backgroundColor: accentColor,
+                    }}
+                  />
+                </div>
               </div>
 
-              <h3 className="font-amiri text-2xl font-bold leading-relaxed">
+              <h3 className="font-amiri text-2xl sm:text-3xl font-bold leading-relaxed">
                 {currentQuiz.prompt}
               </h3>
 
@@ -216,7 +321,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                   const isPicked = pickedOpt === idx;
                   const isCorrect = idx === currentQuiz.correctIndex;
                   let style =
-                    'border-[var(--platform-border)] bg-[var(--platform-surface-muted)]';
+                    'border-[var(--platform-border)] bg-[var(--platform-surface-muted)] hover:border-sky-400';
                   if (pickedOpt !== null) {
                     if (isCorrect) style = 'border-emerald-600 bg-emerald-50 text-emerald-900';
                     else if (isPicked) style = 'border-rose-600 bg-rose-50 text-rose-900';
@@ -228,11 +333,20 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                       onClick={() => {
                         if (pickedOpt !== null) return;
                         setPickedOpt(idx);
-                        if (idx === currentQuiz.correctIndex) setQuizScore((s) => s + 1);
+                        if (idx === currentQuiz.correctIndex) {
+                          playSoftChime('success', soundEnabled);
+                          setQuizScore((s) => s + 1);
+                        }
                       }}
-                      className={`w-full rounded-2xl border-2 px-5 py-4 text-right font-amiri text-xl font-bold transition-colors ${style}`}
+                      className={`w-full flex items-center gap-3 rounded-2xl border-2 px-5 py-4 text-right font-amiri text-xl font-bold transition-colors ${style}`}
                     >
-                      {opt}
+                      <span
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-sm font-extrabold text-white"
+                        style={{ backgroundColor: accentColor }}
+                      >
+                        {OPTION_LETTERS[idx] || idx + 1}
+                      </span>
+                      <span className="flex-1">{opt}</span>
                     </button>
                   );
                 })}
@@ -265,15 +379,18 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
 
       {/* Matching */}
       {tab === 'matching' && activity.matchingPairs && (
-        <div className="rounded-3xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 space-y-6">
-          <div className="flex justify-end">
+        <div className="rounded-3xl border-2 border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-bold text-[var(--platform-text-muted)] tabular-nums">
+              {matchedCorrectCount} / {activity.matchingPairs.length}
+            </div>
             <button
               type="button"
               onClick={() => {
                 setMatches({});
                 setSelectedLeft(null);
               }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--platform-border)] px-3 py-1.5 text-xs font-semibold"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--platform-border)] px-3.5 py-2 text-xs font-bold"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span>إعادة</span>
@@ -290,7 +407,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                     key={pair.id}
                     type="button"
                     onClick={() => setSelectedLeft(pair.id)}
-                    className={`w-full rounded-xl border-2 p-4 text-right font-bold transition-colors ${
+                    className={`w-full rounded-2xl border-2 p-4 text-right font-bold transition-colors ${
                       isSelected
                         ? 'border-[#0284C7] bg-sky-50 text-slate-900'
                         : matched
@@ -301,46 +418,65 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                     }`}
                   >
                     <div>{pair.left}</div>
-                    {matched && <div className="mt-1 text-sm text-[#0284C7]">← {matched}</div>}
+                    {matched && <div className="mt-1.5 text-sm text-[#0284C7]">← {matched}</div>}
                   </button>
                 );
               })}
             </div>
             <div className="space-y-3">
-              {activity.matchingPairs.map((pair) => (
-                <button
-                  key={`r-${pair.id}`}
-                  type="button"
-                  onClick={() => {
-                    if (!selectedLeft) return;
-                    setMatches((prev) => ({ ...prev, [selectedLeft]: pair.right }));
-                    setSelectedLeft(null);
-                  }}
-                  className="w-full rounded-xl border-2 border-[var(--platform-border)] bg-[var(--platform-surface-muted)] p-4 text-right font-bold hover:border-[#0284C7]"
-                >
-                  {pair.right}
-                </button>
-              ))}
+              {shuffledRightPairs.map((pair) => {
+                const isMatchedHere = Object.values(matches).includes(pair.right);
+                return (
+                  <button
+                    key={`r-${pair.id}`}
+                    type="button"
+                    onClick={() => {
+                      if (!selectedLeft) return;
+                      setMatches((prev) => ({ ...prev, [selectedLeft]: pair.right }));
+                      setSelectedLeft(null);
+                    }}
+                    className={`w-full rounded-2xl border-2 p-4 text-right font-bold transition-colors ${
+                      isMatchedHere
+                        ? 'border-sky-300 bg-sky-50/70 text-slate-900'
+                        : 'border-[var(--platform-border)] bg-[var(--platform-surface-muted)] hover:border-[#0284C7]'
+                    }`}
+                  >
+                    {pair.right}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
       )}
 
-      {/* Verbatim Sections */}
+      {/* Verbatim Sections & Drawing Prompt */}
       {tab === 'sections' && (
         <div className="space-y-4">
+          {activity.drawingPrompt && (
+            <div
+              className="rounded-2xl border-2 bg-amber-50/70 p-5 flex items-start gap-3 text-slate-900"
+              style={{ borderColor: accentColor }}
+            >
+              <Palette className="w-6 h-6 shrink-0 mt-0.5" style={{ color: accentColor }} />
+              <div className="font-amiri text-xl font-bold leading-relaxed">
+                {activity.drawingPrompt}
+              </div>
+            </div>
+          )}
+
           {activity.sections.length > 0
             ? activity.sections.map((sec) => (
                 <div
                   key={sec.id}
-                  className="rounded-2xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 space-y-3"
+                  className="rounded-2xl border-2 border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 space-y-3"
                 >
                   {sec.heading && (
                     <h4 className="text-lg font-extrabold" style={{ color: accentColor }}>
                       {sec.heading}
                     </h4>
                   )}
-                  <div className="space-y-2">
+                  <div className="space-y-2.5">
                     {sec.items.map((item, idx) => {
                       const key = `${sec.id}-${idx}`;
                       const checked = Boolean(checkedItems[key]);
@@ -351,7 +487,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
                           onClick={() =>
                             setCheckedItems((prev) => ({ ...prev, [key]: !prev[key] }))
                           }
-                          className={`w-full flex items-start gap-3 rounded-xl p-3 text-right font-amiri text-xl leading-relaxed transition-colors ${
+                          className={`w-full flex items-start gap-3 rounded-xl p-3.5 text-right font-amiri text-xl leading-relaxed transition-colors ${
                             checked
                               ? 'bg-emerald-50 text-emerald-900'
                               : 'bg-[var(--platform-surface-muted)]'
@@ -376,7 +512,7 @@ export const SmartConvertedView: React.FC<Props> = ({ activity, accentColor }) =
             : activity.verbatimTextBlocks.map((block, idx) => (
                 <div
                   key={idx}
-                  className="rounded-2xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 font-amiri text-xl leading-relaxed whitespace-pre-wrap"
+                  className="rounded-2xl border-2 border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 font-amiri text-xl leading-relaxed whitespace-pre-wrap"
                 >
                   {block}
                 </div>

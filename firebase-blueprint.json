@@ -1,0 +1,273 @@
+{
+  "entities": {
+    "PlatformAppearance": {
+      "title": "PlatformAppearance",
+      "description": "Global platform appearance, theme, and layout distribution configuration.",
+      "type": "object",
+      "properties": {
+        "themePreset": {
+          "type": "string",
+          "enum": ["daylight", "ocean", "evening", "emirati"],
+          "maxLength": 20,
+          "description": "Active visual theme preset."
+        },
+        "primaryAccent": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7,
+          "description": "Primary hex accent color."
+        },
+        "columns": {
+          "type": "integer",
+          "description": "Grid column count (2 or 3)."
+        },
+        "viewMode": {
+          "type": "string",
+          "enum": ["grid", "list"],
+          "maxLength": 10,
+          "description": "Material catalog view mode."
+        },
+        "cardStyle": {
+          "type": "string",
+          "enum": ["rounded", "circle", "compact"],
+          "maxLength": 12,
+          "description": "Material card visual shape."
+        },
+        "fontSize": {
+          "type": "string",
+          "enum": ["normal", "large", "xlarge"],
+          "maxLength": 12,
+          "description": "Base typography scale."
+        },
+        "showCategoriesBar": {
+          "type": "boolean",
+          "description": "Whether category filter bar is displayed."
+        },
+        "showFeaturedSection": {
+          "type": "boolean",
+          "description": "Whether featured materials section is displayed."
+        },
+        "showChannelLinks": {
+          "type": "boolean",
+          "description": "Whether official channel links footer is displayed."
+        },
+        "showOriginalPdfButton": {
+          "type": "boolean",
+          "description": "Whether the original source button is displayed inside activities."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last appearance update."
+        }
+      },
+      "required": [
+        "themePreset",
+        "primaryAccent",
+        "columns",
+        "viewMode",
+        "cardStyle",
+        "fontSize",
+        "showCategoriesBar",
+        "showFeaturedSection",
+        "showChannelLinks",
+        "showOriginalPdfButton",
+        "updatedAt"
+      ]
+    },
+    "EducationalMaterial": {
+      "title": "EducationalMaterial",
+      "description": "Interactive children's educational material with verbatim source content and activity metadata.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128,
+          "description": "Unique material identifier."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Verbatim material title."
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "Optional verbatim subtitle."
+        },
+        "author": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Optional author name."
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Material category label."
+        },
+        "activityType": {
+          "type": "string",
+          "enum": [
+            "qa_flashcards",
+            "aqeedah_activities_pack",
+            "adhkar_cards",
+            "story_chapters",
+            "problem_solution_guide",
+            "smart_cards"
+          ],
+          "maxLength": 32,
+          "description": "Interactive player renderer type."
+        },
+        "accentColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "maxLength": 7,
+          "description": "Card accent hex color."
+        },
+        "themeMotif": {
+          "type": "string",
+          "enum": ["ocean", "activities", "morning", "evening", "desert", "guide"],
+          "maxLength": 24,
+          "description": "Card illustration motif."
+        },
+        "published": {
+          "type": "boolean",
+          "description": "Whether the material is visible to children and public visitors."
+        },
+        "featured": {
+          "type": "boolean",
+          "description": "Whether the material is highlighted in featured section."
+        },
+        "order": {
+          "type": "integer",
+          "description": "Display sort order."
+        },
+        "sourceUrl": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Optional local source PDF or image path."
+        },
+        "sourceMimeType": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Optional source MIME type."
+        },
+        "sourceFileName": {
+          "type": "string",
+          "maxLength": 260,
+          "description": "Optional original source filename."
+        },
+        "externalLinks": {
+          "type": "array",
+          "description": "Optional list of verbatim source or channel links (max 10)."
+        },
+        "qaItems": {
+          "type": "array",
+          "description": "Optional verbatim Q&A cards (max 100)."
+        },
+        "dhikrItems": {
+          "type": "array",
+          "description": "Optional verbatim adhkar items (max 100)."
+        },
+        "storyChapters": {
+          "type": "array",
+          "description": "Optional verbatim story chapters (max 30)."
+        },
+        "storyLessonsIntro": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "Optional verbatim story lessons intro."
+        },
+        "storyLessonsHeading": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional verbatim story lessons heading."
+        },
+        "storyLessons": {
+          "type": "array",
+          "description": "Optional verbatim story lessons (max 50)."
+        },
+        "problemSolution": {
+          "type": "object",
+          "description": "Optional problem-and-solution guide payload."
+        },
+        "smartActivity": {
+          "type": "object",
+          "description": "Optional AI-extracted verbatim interactive activity payload."
+        },
+        "ownerId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128,
+          "description": "Admin UID who created this material."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last update."
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "category",
+        "activityType",
+        "accentColor",
+        "themeMotif",
+        "published",
+        "featured",
+        "order",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized platform administrator record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the administrator."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 320,
+          "description": "Verified administrator email."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/platform_config/{configId}": {
+      "schema": { "$ref": "#/entities/PlatformAppearance" },
+      "description": "Stores global platform theme and layout distribution settings (document ID: appearance)."
+    },
+    "/materials/{materialId}": {
+      "schema": { "$ref": "#/entities/EducationalMaterial" },
+      "description": "Stores published and draft educational materials synced in real time across deployments."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Stores authorized administrator UIDs for role verification."
+    }
+  }
+}

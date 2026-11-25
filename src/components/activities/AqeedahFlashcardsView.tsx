@@ -1,17 +1,27 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'motion/react';
 import { CheckCircle2, RotateCcw, Eye, EyeOff, ArrowRight, ArrowLeft } from 'lucide-react';
 import type { QAItem } from '../../types/platform.ts';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 interface Props {
   items: QAItem[];
   author?: string;
+  soundEnabled?: boolean;
+  onComplete?: () => void;
 }
 
-export const AqeedahFlashcardsView: React.FC<Props> = ({ items, author }) => {
+export const AqeedahFlashcardsView: React.FC<Props> = ({
+  items,
+  author,
+  soundEnabled = true,
+  onComplete,
+}) => {
   const [mode, setMode] = useState<'cards' | 'quiz'>('cards');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [completedIds, setCompletedIds] = useState<Record<string, boolean>>({});
+  const completionFiredRef = useRef(false);
 
   // Quiz state built strictly verbatim from the 25 Q&A items
   const [quizIndex, setQuizIndex] = useState(0);
@@ -41,15 +51,25 @@ export const AqeedahFlashcardsView: React.FC<Props> = ({ items, author }) => {
     });
   }, [items]);
 
+  const completedCount = Object.values(completedIds).filter(Boolean).length;
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    if (quizFinished || (items.length > 0 && completedCount === items.length)) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [quizFinished, completedCount, items.length, onComplete]);
+
   if (!items.length) return null;
 
   const currentCard = items[currentIndex];
-  const completedCount = Object.values(completedIds).filter(Boolean).length;
 
   const handleRevealToggle = () => {
     const nextState = !revealed;
     setRevealed(nextState);
     if (nextState) {
+      playSoftChime('tap', soundEnabled);
       setCompletedIds((prev) => ({ ...prev, [currentCard.id]: true }));
     }
   };
@@ -65,6 +85,7 @@ export const AqeedahFlashcardsView: React.FC<Props> = ({ items, author }) => {
     if (selectedOption !== null) return;
     setSelectedOption(opt);
     if (opt === currentQuiz.correctAnswer) {
+      playSoftChime('success', soundEnabled);
       setScore((s) => s + 1);
     }
   };
@@ -123,10 +144,30 @@ export const AqeedahFlashcardsView: React.FC<Props> = ({ items, author }) => {
         </div>
       </div>
 
+      {/* Visual Progress Bar */}
+      <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--platform-surface-muted)]">
+        <div
+          className="h-full rounded-full bg-[#0E7490] transition-all duration-300"
+          style={{
+            width: `${
+              mode === 'cards'
+                ? Math.round((completedCount / items.length) * 100)
+                : Math.round(((quizIndex + (quizFinished ? 1 : 0)) / quizQuestions.length) * 100)
+            }%`,
+          }}
+        />
+      </div>
+
       {mode === 'cards' ? (
         <div className="space-y-6">
           {/* Circular Ocean Card Inspired by PDF */}
-          <div className="mx-auto max-w-xl rounded-3xl border-4 border-[#0E7490] bg-white p-8 sm:p-12 text-center shadow-sm text-slate-900">
+          <motion.div
+            key={currentCard.id}
+            initial={{ opacity: 0.75, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+            className="mx-auto max-w-xl rounded-3xl border-4 border-[#0E7490] bg-white p-8 sm:p-12 text-center shadow-sm text-slate-900"
+          >
             <div className="mx-auto mb-6 flex h-12 w-12 items-center justify-center rounded-full border-2 border-[#0E7490] text-xl font-bold text-[#0E7490] tabular-nums">
               {currentCard.number}
             </div>
@@ -150,12 +191,12 @@ export const AqeedahFlashcardsView: React.FC<Props> = ({ items, author }) => {
             <button
               type="button"
               onClick={handleRevealToggle}
-              className="inline-flex items-center gap-2 rounded-xl bg-[#0E7490] px-6 py-3 text-base font-bold text-white hover:opacity-95 transition-opacity whitespace-nowrap"
+              className="inline-flex items-center gap-2 rounded-xl bg-[#0E7490] px-6 py-3 text-base font-bold text-white hover:opacity-95 transition-opacity whitespace-nowrap active:scale-[0.98]"
             >
               {revealed ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
               <span>{revealed ? 'إخفاء' : 'عرض'}</span>
             </button>
-          </div>
+          </motion.div>
 
           {/* Navigation + Number Strip */}
           <div className="flex items-center justify-between gap-4">

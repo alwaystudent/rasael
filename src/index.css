@@ -73,6 +73,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+.storybook-pattern {
+  background-image: radial-gradient(rgba(14, 116, 144, 0.08) 1.5px, transparent 1.5px);
+  background-size: 22px 22px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

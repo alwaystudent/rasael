@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ExternalLink, ArrowRight, ArrowLeft, CheckCircle2, RotateCcw } from 'lucide-react';
 import type { StoryChapter, StoryLesson } from '../../types/platform.ts';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 interface Props {
   chapters: StoryChapter[];
@@ -8,6 +9,8 @@ interface Props {
   lessonsHeading?: string;
   lessons?: StoryLesson[];
   author?: string;
+  soundEnabled?: boolean;
+  onComplete?: () => void;
 }
 
 export const StoryChaptersView: React.FC<Props> = ({
@@ -16,9 +19,13 @@ export const StoryChaptersView: React.FC<Props> = ({
   lessonsHeading,
   lessons = [],
   author,
+  soundEnabled = true,
+  onComplete,
 }) => {
   const [tab, setTab] = useState<'story' | 'lessons' | 'quiz'>('story');
   const [chapterIndex, setChapterIndex] = useState(0);
+  const [visitedChapters, setVisitedChapters] = useState<Record<number, boolean>>({ 0: true });
+  const completionFiredRef = useRef(false);
 
   // Verbatim quiz derived strictly from the story text
   const storyQuiz = [
@@ -58,6 +65,19 @@ export const StoryChaptersView: React.FC<Props> = ({
   const [pickedOption, setPickedOption] = useState<number | null>(null);
   const [quizScore, setQuizScore] = useState(0);
   const [quizDone, setQuizDone] = useState(false);
+
+  useEffect(() => {
+    setVisitedChapters((prev) => (prev[chapterIndex] ? prev : { ...prev, [chapterIndex]: true }));
+  }, [chapterIndex]);
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    const allChaptersRead = chapters.length > 0 && Object.keys(visitedChapters).length >= chapters.length;
+    if (quizDone || allChaptersRead) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [quizDone, visitedChapters, chapters.length, onComplete]);
 
   const currentChapter = chapters[chapterIndex];
   const currentQ = storyQuiz[quizIdx];
@@ -266,7 +286,10 @@ export const StoryChaptersView: React.FC<Props> = ({
                       onClick={() => {
                         if (pickedOption !== null) return;
                         setPickedOption(oIdx);
-                        if (oIdx === currentQ.correctIndex) setQuizScore((s) => s + 1);
+                        if (oIdx === currentQ.correctIndex) {
+                          playSoftChime('success', soundEnabled);
+                          setQuizScore((s) => s + 1);
+                        }
                       }}
                       className={`w-full rounded-2xl border-2 px-5 py-4 text-right font-amiri text-xl font-bold transition-colors ${style}`}
                     >

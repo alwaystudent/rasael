@@ -3,32 +3,47 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  Cloud,
   Edit3,
   Eye,
   EyeOff,
   FileUp,
+  Image as ImageIcon,
   LayoutGrid,
   Link2,
   LogOut,
+  Move,
   Palette,
   Plus,
+  RefreshCw,
   Share2,
   Star,
   Trash2,
   X,
 } from 'lucide-react';
+import {
+  seedFirestoreIfEmpty,
+  syncAppearanceToFirestore,
+  syncMaterialCreateToFirestore,
+  syncMaterialDeleteFromFirestore,
+  syncMaterialFieldToggleToFirestore,
+  syncMaterialsOrderToFirestore,
+  syncMaterialUpdateToFirestore,
+} from '../services/firestoreSync.ts';
 import type {
   AppearanceConfig,
   CardShapeStyle,
   FontSizeScale,
   MaterialItem,
   SmartConvertedActivity,
+  SmartDragDropCard,
   ThemeMotif,
   ThemePresetId,
 } from '../types/platform.ts';
 
 interface Props {
-  token: string;
+  token: string | null;
+  firebaseUid: string | null;
   appearance: AppearanceConfig;
   materials: MaterialItem[];
   onRefresh: () => Promise<void>;
@@ -50,6 +65,7 @@ async function parseJsonSafe<T>(res: Response): Promise<T | null> {
 
 export const AdminDashboardModal: React.FC<Props> = ({
   token,
+  firebaseUid,
   appearance,
   materials,
   onRefresh,
@@ -63,6 +79,8 @@ export const AdminDashboardModal: React.FC<Props> = ({
   // Upload & Smart AI Conversion state
   const [uploading, setUploading] = useState(false);
   const [convertingUrl, setConvertingUrl] = useState(false);
+  const [convertingDragDrop, setConvertingDragDrop] = useState(false);
+  const [syncingAll, setSyncingAll] = useState(false);
   const [externalUrlInput, setExternalUrlInput] = useState('');
   const [draftMaterial, setDraftMaterial] = useState<Partial<MaterialItem> | null>(null);
 
@@ -75,10 +93,14 @@ export const AdminDashboardModal: React.FC<Props> = ({
   const [appearanceDraft, setAppearanceDraft] = useState<AppearanceConfig>(appearance);
   const [savingAppearance, setSavingAppearance] = useState(false);
 
-  const authHeaders = {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-  };
+  const authHeaders: Record<string, string> = token
+    ? {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      }
+    : {
+        'Content-Type': 'application/json',
+      };
 
   const showToast = (msg: string) => {
     setStatusMessage(msg);
@@ -86,9 +108,35 @@ export const AdminDashboardModal: React.FC<Props> = ({
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
+  const handleSyncAllToCloud = async () => {
+    if (!firebaseUid) {
+      setErrorMessage('يرجى تسجيل الدخول بحساب Google لتفعيل المزامنة التلقائية مع Firebase.');
+      return;
+    }
+    setSyncingAll(true);
+    setErrorMessage(null);
+    try {
+      await syncAppearanceToFirestore(appearanceDraft);
+      for (const item of materials) {
+        await syncMaterialUpdateToFirestore(item, firebaseUid);
+      }
+      await seedFirestoreIfEmpty(firebaseUid, materials, appearanceDraft);
+      showToast('تمت مزامنة كافة المواد والمظهر تلقائياً مع Firebase و Vercel.');
+    } catch {
+      setErrorMessage('تعذر إتمام المزامنة السحابية حالياً.');
+    } finally {
+      setSyncingAll(false);
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!token) {
+      setErrorMessage('يلزم الاتصال بخادم التحويل الذكي (Gemini) لتحويل الملفات.');
+      e.target.value = '';
+      return;
+    }
     setErrorMessage(null);
     setUploading(true);
 
@@ -121,7 +169,7 @@ export const AdminDashboardModal: React.FC<Props> = ({
         smartActivity?: SmartConvertedActivity;
       }>(res);
 
-      if (res.status === 401) {
+      if (res.status === 401 && !firebaseUid) {
         onLogout();
         return;
       }
@@ -154,10 +202,162 @@ export const AdminDashboardModal: React.FC<Props> = ({
     }
   };
 
+  const handleDragDropImagesUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    appendToDraft = false
+  ) => {
+    const fileList = Array.from(e.target.files || []);
+    if (fileList.length === 0) return;
+    if (!token) {
+      setErrorMessage('يلزم الاتصال بالخادم لرفع وتحويل الصور إلى لعبة سحب وإفلات.');
+      e.target.value = '';
+      return;
+    }
+    if (fileList.length > 10) {
+      setErrorMessage('يمكن رفع حتى 10 صور في المرة الواحدة.');
+      e.target.value = '';
+      return;
+    }
+
+    setErrorMessage(null);
+    setConvertingDragDrop(true);
+
+    try {
+      const imagesPayload = await Promise.all(
+        fileList.map(
+          (file) =>
+            new Promise<{ fileName: string; mimeType: string; base64Data: string }>(
+              (resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () =>
+                  resolve({
+                    fileName: file.name,
+                    mimeType: file.type,
+                    base64Data: String(reader.result || ''),
+                  });
+                reader.onerror = () => reject(new Error('تعذر قراءة إحدى الصور.'));
+                reader.readAsDataURL(file);
+              }
+            )
+        )
+      );
+
+      const res = await fetch('/api/admin/convert-images-dragdrop', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ images: imagesPayload }),
+      });
+
+      const data = await parseJsonSafe<{
+        error?: string;
+        suggestedTitle?: string;
+        suggestedCategory?: string;
+        smartActivity?: SmartConvertedActivity;
+      }>(res);
+
+      if (res.status === 401 && !firebaseUid) {
+        onLogout();
+        return;
+      }
+
+      if (!res.ok || !data?.smartActivity) {
+        setErrorMessage(
+          data?.error || `تعذر تحويل الصور إلى لعبة سحب وإفلات (رمز الحالة: ${res.status}).`
+        );
+        return;
+      }
+
+      const incomingCards = data.smartActivity.dragDropCards || [];
+
+      if (appendToDraft && draftMaterial) {
+        setDraftMaterial((prev) => {
+          if (!prev) return prev;
+          const prevCards = prev.smartActivity?.dragDropCards || [];
+          const mergedCards = [...prevCards, ...incomingCards];
+          return {
+            ...prev,
+            smartActivity: {
+              mode: 'drag_drop_images',
+              verbatimTextBlocks: mergedCards.map((c) => c.title),
+              sections: prev.smartActivity?.sections || [],
+              flashcards: prev.smartActivity?.flashcards || [],
+              quizQuestions: prev.smartActivity?.quizQuestions || [],
+              matchingPairs: prev.smartActivity?.matchingPairs,
+              dragDropCards: mergedCards,
+              drawingPrompt: prev.smartActivity?.drawingPrompt,
+            },
+          };
+        });
+        showToast(`تمت إضافة ${incomingCards.length} صور إلى لعبة السحب والإفلات.`);
+      } else {
+        setDraftMaterial({
+          title: data.suggestedTitle || 'لعبة مطابقة الصور بالعناوين',
+          subtitle: 'اسحب كل عنوان وضعه أسفل الصورة المناسبة',
+          category: data.suggestedCategory || 'فقرة الأنشطة',
+          activityType: 'smart_cards',
+          accentColor: appearanceDraft.primaryAccent,
+          themeMotif: 'activities',
+          published: true,
+          featured: false,
+          sourceUrl: incomingCards[0]?.imageUrl,
+          sourceMimeType: fileList[0]?.type,
+          sourceFileName: fileList[0]?.name,
+          smartActivity: data.smartActivity,
+        });
+        showToast('تم تحويل الصور المرفوعة إلى لعبة سحب وإفلات بنجاح.');
+      }
+    } catch {
+      setErrorMessage('تعذر رفع الصور أو تحويلها إلى لعبة سحب وإفلات.');
+    } finally {
+      setConvertingDragDrop(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleToggleDraftDragDropMode = (enableDragDrop: boolean) => {
+    setDraftMaterial((prev) => {
+      if (!prev || !prev.smartActivity) return prev;
+      if (enableDragDrop) {
+        const existingCards = prev.smartActivity.dragDropCards || [];
+        const seededCards: SmartDragDropCard[] =
+          existingCards.length > 0
+            ? existingCards
+            : prev.sourceUrl
+              ? [
+                  {
+                    id: `dd-${Date.now()}-0`,
+                    title: prev.title?.trim() || 'صورة 1',
+                    imageUrl: prev.sourceUrl,
+                  },
+                ]
+              : [];
+        return {
+          ...prev,
+          smartActivity: {
+            ...prev.smartActivity,
+            mode: 'drag_drop_images',
+            dragDropCards: seededCards,
+          },
+        };
+      }
+      return {
+        ...prev,
+        smartActivity: {
+          ...prev.smartActivity,
+          mode: 'flashcards',
+        },
+      };
+    });
+  };
+
   const handleExternalUrlConvert = async (e: React.FormEvent) => {
     e.preventDefault();
     const url = externalUrlInput.trim();
     if (!url) return;
+    if (!token) {
+      setErrorMessage('يلزم الاتصال بخادم التحويل الذكي (Gemini) لتحويل الروابط الخارجية.');
+      return;
+    }
     setErrorMessage(null);
     setConvertingUrl(true);
 
@@ -177,7 +377,7 @@ export const AdminDashboardModal: React.FC<Props> = ({
         smartActivity?: SmartConvertedActivity;
       }>(res);
 
-      if (res.status === 401) {
+      if (res.status === 401 && !firebaseUid) {
         onLogout();
         return;
       }
@@ -212,23 +412,60 @@ export const AdminDashboardModal: React.FC<Props> = ({
     if (!draftMaterial?.title) return;
     setErrorMessage(null);
     try {
-      const res = await fetch('/api/admin/materials', {
-        method: 'POST',
-        headers: authHeaders,
-        body: JSON.stringify(draftMaterial),
-      });
-      const data = await parseJsonSafe<{ error?: string }>(res);
-      if (res.status === 401) {
-        onLogout();
-        return;
+      const maxOrder = materials.reduce((acc, m) => Math.max(acc, m.order), 0);
+      let createdMaterial: MaterialItem = {
+        id: `mat-${Date.now()}`,
+        title: draftMaterial.title.trim(),
+        subtitle: draftMaterial.subtitle?.trim() || undefined,
+        author: draftMaterial.author?.trim() || undefined,
+        category: draftMaterial.category?.trim() || 'العقيدة للأطفال',
+        activityType: draftMaterial.activityType || 'smart_cards',
+        accentColor: draftMaterial.accentColor || appearanceDraft.primaryAccent,
+        themeMotif: draftMaterial.themeMotif || 'ocean',
+        published: draftMaterial.published ?? true,
+        featured: draftMaterial.featured ?? false,
+        order: maxOrder + 1,
+        sourceUrl: draftMaterial.sourceUrl,
+        sourceMimeType: draftMaterial.sourceMimeType,
+        sourceFileName: draftMaterial.sourceFileName,
+        externalLinks: draftMaterial.externalLinks,
+        smartActivity: draftMaterial.smartActivity,
+        createdAt: new Date().toISOString(),
+      };
+
+      if (token) {
+        try {
+          const res = await fetch('/api/admin/materials', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(draftMaterial),
+          });
+          const data = await parseJsonSafe<{ material?: MaterialItem; error?: string }>(res);
+          if (res.ok && data?.material) {
+            createdMaterial = data.material;
+          } else if (!firebaseUid) {
+            setErrorMessage(data?.error || `تعذر نشر المحتوى (رمز الحالة: ${res.status}).`);
+            return;
+          }
+        } catch {
+          if (!firebaseUid) {
+            setErrorMessage('تعذر حفظ المحتوى.');
+            return;
+          }
+        }
       }
-      if (!res.ok) {
-        setErrorMessage(data?.error || `تعذر نشر المحتوى (رمز الحالة: ${res.status}).`);
-        return;
+
+      if (firebaseUid) {
+        await syncMaterialCreateToFirestore(createdMaterial, firebaseUid);
       }
+
       setDraftMaterial(null);
       await onRefresh();
-      showToast('تمت إضافة المحتوى ونشره بنجاح.');
+      showToast(
+        firebaseUid
+          ? 'تمت إضافة المحتوى ومزامنته تلقائياً على Firebase و Vercel.'
+          : 'تمت إضافة المحتوى ونشره بنجاح.'
+      );
     } catch {
       setErrorMessage('تعذر حفظ المحتوى.');
     }
@@ -238,23 +475,35 @@ export const AdminDashboardModal: React.FC<Props> = ({
     if (!editingMaterial) return;
     setErrorMessage(null);
     try {
-      const res = await fetch(`/api/admin/materials/${editingMaterial.id}`, {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify(editingMaterial),
-      });
-      const data = await parseJsonSafe<{ error?: string }>(res);
-      if (res.status === 401) {
-        onLogout();
-        return;
+      if (token) {
+        try {
+          const res = await fetch(`/api/admin/materials/${editingMaterial.id}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: JSON.stringify(editingMaterial),
+          });
+          const data = await parseJsonSafe<{ error?: string }>(res);
+          if (!res.ok && !firebaseUid) {
+            setErrorMessage(data?.error || `تعذر تحديث المحتوى (رمز الحالة: ${res.status}).`);
+            return;
+          }
+        } catch {
+          if (!firebaseUid) {
+            setErrorMessage('تعذر حفظ التعديلات.');
+            return;
+          }
+        }
       }
-      if (!res.ok) {
-        setErrorMessage(data?.error || `تعذر تحديث المحتوى (رمز الحالة: ${res.status}).`);
-        return;
+
+      if (firebaseUid) {
+        await syncMaterialUpdateToFirestore(editingMaterial, firebaseUid);
       }
+
       setEditingMaterial(null);
       await onRefresh();
-      showToast('تم حفظ التعديلات.');
+      showToast(
+        firebaseUid ? 'تم حفظ التعديلات ومزامنتها سحابياً تلقائياً.' : 'تم حفظ التعديلات.'
+      );
     } catch {
       setErrorMessage('تعذر حفظ التعديلات.');
     }
@@ -262,11 +511,21 @@ export const AdminDashboardModal: React.FC<Props> = ({
 
   const handleToggleField = async (item: MaterialItem, field: 'published' | 'featured') => {
     try {
-      await fetch(`/api/admin/materials/${item.id}`, {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify({ [field]: !item[field] }),
-      });
+      const nextVal = !item[field];
+      if (token) {
+        try {
+          await fetch(`/api/admin/materials/${item.id}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: JSON.stringify({ [field]: nextVal }),
+          });
+        } catch {
+          if (!firebaseUid) throw new Error('network');
+        }
+      }
+      if (firebaseUid) {
+        await syncMaterialFieldToggleToFirestore(item.id, field, nextVal);
+      }
       await onRefresh();
     } catch {
       setErrorMessage('تعذر تحديث الحالة.');
@@ -282,11 +541,20 @@ export const AdminDashboardModal: React.FC<Props> = ({
     const orderedIds = reordered.map((m) => m.id);
 
     try {
-      await fetch('/api/admin/materials-order', {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify({ orderedIds }),
-      });
+      if (token) {
+        try {
+          await fetch('/api/admin/materials-order', {
+            method: 'PUT',
+            headers: authHeaders,
+            body: JSON.stringify({ orderedIds }),
+          });
+        } catch {
+          if (!firebaseUid) throw new Error('network');
+        }
+      }
+      if (firebaseUid) {
+        await syncMaterialsOrderToFirestore(orderedIds);
+      }
       await onRefresh();
     } catch {
       setErrorMessage('تعذر تغيير الترتيب.');
@@ -295,13 +563,25 @@ export const AdminDashboardModal: React.FC<Props> = ({
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`/api/admin/materials/${id}`, {
-        method: 'DELETE',
-        headers: authHeaders,
-      });
-      if (!res.ok) {
-        setErrorMessage('تعذر حذف المادة.');
-        return;
+      if (token) {
+        try {
+          const res = await fetch(`/api/admin/materials/${id}`, {
+            method: 'DELETE',
+            headers: authHeaders,
+          });
+          if (!res.ok && !firebaseUid) {
+            setErrorMessage('تعذر حذف المادة.');
+            return;
+          }
+        } catch {
+          if (!firebaseUid) {
+            setErrorMessage('تعذر حذف المادة.');
+            return;
+          }
+        }
+      }
+      if (firebaseUid) {
+        await syncMaterialDeleteFromFirestore(id);
       }
       setConfirmDeleteId(null);
       await onRefresh();
@@ -327,15 +607,26 @@ export const AdminDashboardModal: React.FC<Props> = ({
     setAppearanceDraft(next);
     setSavingAppearance(true);
     try {
-      const res = await fetch('/api/admin/appearance', {
-        method: 'PUT',
-        headers: authHeaders,
-        body: JSON.stringify(next),
-      });
-      if (res.ok) {
-        await onRefresh();
-        showToast('تم تحديث المظهر والتوزيع.');
+      if (token) {
+        try {
+          await fetch('/api/admin/appearance', {
+            method: 'PUT',
+            headers: authHeaders,
+            body: JSON.stringify(next),
+          });
+        } catch {
+          if (!firebaseUid) throw new Error('network');
+        }
       }
+      if (firebaseUid) {
+        await syncAppearanceToFirestore(next);
+      }
+      await onRefresh();
+      showToast(
+        firebaseUid
+          ? 'تم تحديث المظهر والتوزيع ومزامنته تلقائياً مع Firebase و Vercel.'
+          : 'تم تحديث المظهر والتوزيع.'
+      );
     } catch {
       setErrorMessage('تعذر حفظ إعدادات المظهر.');
     } finally {
@@ -352,9 +643,36 @@ export const AdminDashboardModal: React.FC<Props> = ({
       <div className="my-4 w-full max-w-6xl rounded-3xl border border-[var(--platform-border)] bg-[var(--platform-bg)] text-[var(--platform-text)] shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--platform-border)] bg-[var(--platform-surface)] px-6 py-4">
-          <h2 className="text-xl font-extrabold">لوحة تحكم الإدارة</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-xl font-extrabold">لوحة تحكم الإدارة</h2>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1 text-xs font-bold ${
+                firebaseUid
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                  : 'border-amber-300 bg-amber-50 text-amber-900'
+              }`}
+            >
+              <Cloud className="w-3.5 h-3.5" />
+              <span>
+                {firebaseUid
+                  ? 'مزامنة تلقائية نشطة (Firebase + Vercel)'
+                  : 'وضع الخادم المحلي فقط'}
+              </span>
+            </span>
+          </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {firebaseUid && (
+              <button
+                type="button"
+                disabled={syncingAll}
+                onClick={() => void handleSyncAllToCloud()}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--platform-accent)] bg-[var(--platform-surface-muted)] px-3.5 py-2 text-xs font-bold disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingAll ? 'animate-spin' : ''}`} />
+                <span>{syncingAll ? 'جاري المزامنة...' : 'مزامنة الكل للسحابة'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onLogout}
@@ -442,24 +760,43 @@ export const AdminDashboardModal: React.FC<Props> = ({
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h3 className="text-lg font-extrabold">
-                      إضافة محتوى (PDF أو صور) وتحويله تلقائياً إلى نشاط تفاعلي
+                      إضافة محتوى (PDF أو صور أو أي رابط على الشابكة) وتحويله تلقائياً إلى نشاط تفاعلي
                     </h3>
                     <p className="text-sm text-[var(--platform-text-muted)]">
-                      يتم استخراج النصوص كما هي حرفياً دون تعديل أو استبدال.
+                      يتم جلب النصوص والمصطلحات كما جاءت في المصدر حرفياً دون أي إضافة أو تغيير، ودون حفظ الملف عند التحويل من رابط.
                     </p>
                   </div>
 
-                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-[var(--platform-accent)] px-5 py-3 text-sm font-bold text-white hover:opacity-95 whitespace-nowrap">
-                    <Plus className="w-4 h-4" />
-                    <span>{uploading ? 'جاري التحويل الذكي...' : 'رفع PDF أو صورة'}</span>
-                    <input
-                      type="file"
-                      accept="application/pdf,image/png,image/jpeg,image/webp"
-                      disabled={uploading || convertingUrl}
-                      onChange={handleFileUpload}
-                      className="sr-only"
-                    />
-                  </label>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-[var(--platform-accent)] px-4 py-3 text-sm font-bold text-white hover:opacity-95 whitespace-nowrap">
+                      <Plus className="w-4 h-4" />
+                      <span>{uploading ? 'جاري التحويل الذكي...' : 'رفع PDF أو صورة'}</span>
+                      <input
+                        type="file"
+                        accept="application/pdf,image/png,image/jpeg,image/webp"
+                        disabled={uploading || convertingUrl || convertingDragDrop}
+                        onChange={handleFileUpload}
+                        className="sr-only"
+                      />
+                    </label>
+
+                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border-2 border-[var(--platform-accent)] bg-[var(--platform-surface-muted)] px-4 py-2.5 text-sm font-bold text-[var(--platform-text)] hover:opacity-90 whitespace-nowrap">
+                      <Move className="w-4 h-4 text-[var(--platform-accent)]" />
+                      <span>
+                        {convertingDragDrop
+                          ? 'جاري تجهيز اللعبة...'
+                          : 'تحويل صور إلى لعبة سحب وإفلات'}
+                      </span>
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/png,image/jpeg,image/webp"
+                        disabled={uploading || convertingUrl || convertingDragDrop}
+                        onChange={(e) => void handleDragDropImagesUpload(e, false)}
+                        className="sr-only"
+                      />
+                    </label>
+                  </div>
                 </div>
 
                 {/* External Link Converter (No Local File Saved) */}
@@ -475,19 +812,19 @@ export const AdminDashboardModal: React.FC<Props> = ({
                       required
                       value={externalUrlInput}
                       onChange={(e) => setExternalUrlInput(e.target.value)}
-                      placeholder="https://example.com/file.pdf"
-                      disabled={convertingUrl || uploading}
+                      placeholder="https://t.me/rasael_emaratia_children/.. أو أي رابط صفحة أو PDF أو صورة"
+                      disabled={convertingUrl || uploading || convertingDragDrop}
                       className="w-full rounded-xl border border-[var(--platform-border)] bg-[var(--platform-bg)] pr-10 pl-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--platform-accent)]"
                     />
                   </div>
                   <button
                     type="submit"
-                    disabled={convertingUrl || uploading || !externalUrlInput.trim()}
+                    disabled={convertingUrl || uploading || convertingDragDrop || !externalUrlInput.trim()}
                     className="inline-flex items-center justify-center gap-2 rounded-xl border border-[var(--platform-accent)] bg-[var(--platform-surface-muted)] px-5 py-2.5 text-sm font-bold text-[var(--platform-text)] hover:opacity-90 disabled:opacity-50 whitespace-nowrap"
                   >
                     <Link2 className="w-4 h-4" />
                     <span>
-                      {convertingUrl ? 'جاري التحويل...' : 'تحويل من رابط (دون حفظ الملف)'}
+                      {convertingUrl ? 'جاري الجلب والتحويل...' : 'جلب وتحويل من رابط'}
                     </span>
                   </button>
                 </form>
@@ -495,17 +832,49 @@ export const AdminDashboardModal: React.FC<Props> = ({
                 {/* Draft Preview Before Publish */}
                 {draftMaterial && (
                   <div className="rounded-2xl border border-[var(--platform-border)] bg-[var(--platform-bg)] p-5 space-y-4">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <span className="text-sm font-extrabold text-[var(--platform-accent)]">
                         معاينة النشاط المستخرج
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => setDraftMaterial(null)}
-                        className="text-xs font-bold text-rose-600"
-                      >
-                        إلغاء
-                      </button>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {(draftMaterial.sourceMimeType?.startsWith('image/') ||
+                          draftMaterial.smartActivity?.mode === 'drag_drop_images' ||
+                          (draftMaterial.smartActivity?.dragDropCards?.length || 0) > 0) && (
+                          <div className="flex items-center gap-1 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-1">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleDraftDragDropMode(false)}
+                              className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                                draftMaterial.smartActivity?.mode !== 'drag_drop_images'
+                                  ? 'bg-[var(--platform-accent)] text-white'
+                                  : 'text-[var(--platform-text-muted)]'
+                              }`}
+                            >
+                              نشاط ذكي
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleDraftDragDropMode(true)}
+                              className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                                draftMaterial.smartActivity?.mode === 'drag_drop_images'
+                                  ? 'bg-[var(--platform-accent)] text-white'
+                                  : 'text-[var(--platform-text-muted)]'
+                              }`}
+                            >
+                              لعبة سحب وإفلات (صور وعناوين)
+                            </button>
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => setDraftMaterial(null)}
+                          className="text-xs font-bold text-rose-600 px-2"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -544,17 +913,105 @@ export const AdminDashboardModal: React.FC<Props> = ({
                       </div>
                     </div>
 
-                    <div className="text-xs text-[var(--platform-text-muted)] tabular-nums">
-                      البطاقات: {draftMaterial.smartActivity?.flashcards.length || 0} · الأسئلة:{' '}
-                      {draftMaterial.smartActivity?.quizQuestions.length || 0} · الفقرات:{' '}
-                      {draftMaterial.smartActivity?.sections.length || 0}
-                    </div>
+                    {draftMaterial.smartActivity?.mode === 'drag_drop_images' ? (
+                      <div className="space-y-3 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-extrabold text-[var(--platform-text)]">
+                            بطاقات الصور والعناوين ({draftMaterial.smartActivity.dragDropCards?.length || 0})
+                          </span>
+                          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-[var(--platform-accent)] bg-[var(--platform-surface-muted)] px-3 py-1.5 text-xs font-bold hover:opacity-90">
+                            <ImageIcon className="w-3.5 h-3.5" />
+                            <span>{convertingDragDrop ? 'جاري الإضافة...' : 'إضافة صور أخرى للعبة'}</span>
+                            <input
+                              type="file"
+                              multiple
+                              accept="image/png,image/jpeg,image/webp"
+                              disabled={convertingDragDrop}
+                              onChange={(e) => void handleDragDropImagesUpload(e, true)}
+                              className="sr-only"
+                            />
+                          </label>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {(draftMaterial.smartActivity.dragDropCards || []).map((card, cIdx) => (
+                            <div
+                              key={card.id}
+                              className="flex items-center gap-3 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-bg)] p-2.5"
+                            >
+                              <img
+                                src={card.imageUrl}
+                                alt={card.title}
+                                referrerPolicy="no-referrer"
+                                className="h-14 w-14 shrink-0 rounded-lg border border-[var(--platform-border)] bg-white object-contain"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <label className="block text-[11px] font-bold text-[var(--platform-text-muted)] mb-1">
+                                  العنوان المطابق للصورة {cIdx + 1}
+                                </label>
+                                <input
+                                  type="text"
+                                  value={card.title}
+                                  onChange={(e) => {
+                                    const nextVal = e.target.value;
+                                    setDraftMaterial((prev) => {
+                                      if (!prev?.smartActivity?.dragDropCards) return prev;
+                                      return {
+                                        ...prev,
+                                        smartActivity: {
+                                          ...prev.smartActivity,
+                                          dragDropCards: prev.smartActivity.dragDropCards.map((c) =>
+                                            c.id === card.id ? { ...c, title: nextVal } : c
+                                          ),
+                                        },
+                                      };
+                                    });
+                                  }}
+                                  className="w-full rounded-lg border border-[var(--platform-border)] bg-[var(--platform-surface)] px-2.5 py-1.5 text-xs font-bold"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                aria-label="حذف الصورة"
+                                onClick={() => {
+                                  setDraftMaterial((prev) => {
+                                    if (!prev?.smartActivity?.dragDropCards) return prev;
+                                    return {
+                                      ...prev,
+                                      smartActivity: {
+                                        ...prev.smartActivity,
+                                        dragDropCards: prev.smartActivity.dragDropCards.filter(
+                                          (c) => c.id !== card.id
+                                        ),
+                                      },
+                                    };
+                                  });
+                                }}
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-700"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-[var(--platform-text-muted)] tabular-nums">
+                        البطاقات: {draftMaterial.smartActivity?.flashcards.length || 0} · الأسئلة:{' '}
+                        {draftMaterial.smartActivity?.quizQuestions.length || 0} · الفقرات:{' '}
+                        {draftMaterial.smartActivity?.sections.length || 0}
+                      </div>
+                    )}
 
                     <div className="flex justify-end gap-2">
                       <button
                         type="button"
                         onClick={handlePublishDraft}
-                        className="rounded-xl bg-emerald-700 px-5 py-2.5 text-sm font-bold text-white"
+                        disabled={
+                          draftMaterial.smartActivity?.mode === 'drag_drop_images' &&
+                          (draftMaterial.smartActivity.dragDropCards?.length || 0) === 0
+                        }
+                        className="rounded-xl bg-emerald-700 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-50"
                       >
                         حفظ ونشر
                       </button>
@@ -980,6 +1437,48 @@ export const AdminDashboardModal: React.FC<Props> = ({
                   </select>
                 </div>
               </div>
+
+              {editingMaterial.smartActivity?.mode === 'drag_drop_images' &&
+                editingMaterial.smartActivity.dragDropCards && (
+                  <div className="space-y-2 pt-2 border-t border-[var(--platform-border)]">
+                    <label className="block text-xs font-extrabold">
+                      عناوين الصور في لعبة السحب والإفلات
+                    </label>
+                    <div className="max-h-52 overflow-y-auto space-y-2 pr-1">
+                      {editingMaterial.smartActivity.dragDropCards.map((card, cIdx) => (
+                        <div key={card.id} className="flex items-center gap-2.5">
+                          <img
+                            src={card.imageUrl}
+                            alt={card.title}
+                            referrerPolicy="no-referrer"
+                            className="h-10 w-10 shrink-0 rounded-lg border border-[var(--platform-border)] bg-white object-contain"
+                          />
+                          <input
+                            type="text"
+                            value={card.title}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setEditingMaterial((prev) => {
+                                if (!prev?.smartActivity?.dragDropCards) return prev;
+                                return {
+                                  ...prev,
+                                  smartActivity: {
+                                    ...prev.smartActivity,
+                                    dragDropCards: prev.smartActivity.dragDropCards.map((c) =>
+                                      c.id === card.id ? { ...c, title: val } : c
+                                    ),
+                                  },
+                                };
+                              });
+                            }}
+                            aria-label={`عنوان الصورة ${cIdx + 1}`}
+                            className="flex-1 rounded-xl border border-[var(--platform-border)] bg-[var(--platform-bg)] px-3 py-2 text-xs font-bold"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">

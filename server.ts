@@ -20,14 +20,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = path.resolve(__dirname, 'data');
+const WRITABLE_ROOT = process.env.VERCEL ? '/tmp/rasael-emaratia' : __dirname;
+const DATA_DIR = path.resolve(WRITABLE_ROOT, 'data');
 const STORE_PATH = path.resolve(DATA_DIR, 'platform-store.json');
 const ADMIN_AUTH_PATH = path.resolve(DATA_DIR, 'admin-auth.json');
 const PUBLIC_DIR = path.resolve(__dirname, 'public');
-const UPLOADS_DIR = path.resolve(PUBLIC_DIR, 'uploads');
+const UPLOADS_DIR = path.resolve(WRITABLE_ROOT, process.env.VERCEL ? 'uploads' : 'public/uploads');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const ADMIN_EMAIL = 'noor.mohamed.hachimi@gmail.com';
+const FIREBASE_CONFIG_PATH = path.resolve(__dirname, 'firebase-applet-config.json');
+const FIREBASE_PROJECT_ID = (() => {
+  try {
+    const raw = JSON.parse(fs.readFileSync(FIREBASE_CONFIG_PATH, 'utf8')) as { projectId?: string };
+    return raw.projectId || '';
+  } catch {
+    return '';
+  }
+})();
 
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
@@ -151,6 +163,100 @@ function isEnvPasscodeConfigured(): boolean {
   return !placeholders.has(envPass);
 }
 
+interface JwkKey {
+  kid: string;
+  kty: string;
+  alg?: string;
+  use?: string;
+  n?: string;
+  e?: string;
+}
+
+let cachedJwks: { keys: JwkKey[]; expiresAt: number } | null = null;
+
+async function getFirebasePublicJwks(): Promise<JwkKey[]> {
+  if (cachedJwks && cachedJwks.expiresAt > Date.now()) {
+    return cachedJwks.keys;
+  }
+  const res = await fetch(
+    'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
+    { signal: AbortSignal.timeout(8000) }
+  );
+  if (!res.ok) {
+    throw new Error('تعذر جلب مفاتيح التحقق من Firebase.');
+  }
+  const data = (await res.json()) as { keys?: JwkKey[] };
+  const keys = Array.isArray(data.keys) ? data.keys : [];
+  cachedJwks = { keys, expiresAt: Date.now() + 60 * 60 * 1000 };
+  return keys;
+}
+
+async function verifyFirebaseAdminIdToken(
+  idToken: string
+): Promise<{ uid: string; email: string }> {
+  if (!FIREBASE_PROJECT_ID) {
+    throw new Error('معرف مشروع Firebase غير مهيأ.');
+  }
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new Error('رمز التحقق غير صالح.');
+  }
+  const [headerB64, payloadB64, sigB64] = parts;
+  const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8')) as {
+    alg?: string;
+    kid?: string;
+  };
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('خوارزمية التوقيع غير صالحة.');
+  }
+
+  const keys = await getFirebasePublicJwks();
+  const jwk = keys.find((k) => k.kid === header.kid);
+  if (!jwk) {
+    throw new Error('تعذر العثور على مفتاح التحقق المطابق.');
+  }
+
+  const publicKey = crypto.createPublicKey({
+    key: jwk as unknown as crypto.JsonWebKey,
+    format: 'jwk',
+  });
+  const verified = crypto.verify(
+    'RSA-SHA256',
+    Buffer.from(`${headerB64}.${payloadB64}`, 'utf8'),
+    publicKey,
+    Buffer.from(sigB64, 'base64url')
+  );
+  if (!verified) {
+    throw new Error('توقيع رمز Firebase غير صالح.');
+  }
+
+  const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+    aud?: string;
+    iss?: string;
+    sub?: string;
+    exp?: number;
+    email?: string;
+    email_verified?: boolean;
+  };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    payload.aud !== FIREBASE_PROJECT_ID ||
+    payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}` ||
+    typeof payload.exp !== 'number' ||
+    payload.exp <= nowSec ||
+    !payload.sub
+  ) {
+    throw new Error('صلاحية رمز التحقق منتهية أو غير مطابقة للمشروع.');
+  }
+
+  if (payload.email_verified !== true || payload.email !== ADMIN_EMAIL) {
+    throw new Error('هذا الحساب غير مصرح له بإدارة المنصة.');
+  }
+
+  return { uid: payload.sub, email: payload.email };
+}
+
 const ALLOWED_MIME_TO_EXT: Record<string, string> = {
   'application/pdf': '.pdf',
   'image/png': '.png',
@@ -230,42 +336,293 @@ async function assertSafeExternalUrl(rawUrl: string): Promise<URL> {
   return parsed;
 }
 
-function extractReadableTextFromHtml(html: string): string {
-  const withoutBlocks = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ');
-  const withBreaks = withoutBlocks
-    .replace(/<\/(p|div|h1|h2|h3|h4|h5|h6|li|tr|br|section|article)>/gi, '\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ');
-  return withBreaks
+function normalizeExternalUrl(rawUrl: string): {
+  targetUrl: string;
+  telegramPostPath?: string;
+} {
+  const trimmed = rawUrl.trim();
+  const parsed = new URL(trimmed);
+  const host = parsed.hostname.toLowerCase();
+
+  if (host === 't.me' || host === 'telegram.me' || host === 'www.t.me') {
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length >= 2 && segments[0] === 's') {
+      const channel = segments[1];
+      const postId = segments[2] && /^\d+$/.test(segments[2]) ? segments[2] : undefined;
+      return {
+        targetUrl: `https://t.me/s/${channel}${postId ? `/${postId}` : ''}`,
+        telegramPostPath: postId ? `${channel}/${postId}` : undefined,
+      };
+    }
+    if (
+      segments.length >= 1 &&
+      !segments[0].startsWith('+') &&
+      !['joinchat', 'addstickers', 'proxy', 'share', 'iv'].includes(segments[0].toLowerCase())
+    ) {
+      const channel = segments[0];
+      const postId = segments[1] && /^\d+$/.test(segments[1]) ? segments[1] : undefined;
+      return {
+        targetUrl: `https://t.me/s/${channel}${postId ? `/${postId}` : ''}`,
+        telegramPostPath: postId ? `${channel}/${postId}` : undefined,
+      };
+    }
+  }
+
+  if (host === 'drive.google.com') {
+    const fileMatch = parsed.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    const idParam = fileMatch?.[1] || parsed.searchParams.get('id');
+    if (idParam) {
+      return {
+        targetUrl: `https://drive.google.com/uc?export=download&id=${encodeURIComponent(idParam)}`,
+      };
+    }
+  }
+
+  if (host === 'dropbox.com' || host === 'www.dropbox.com') {
+    parsed.searchParams.set('dl', '1');
+    return { targetUrl: parsed.toString() };
+  }
+
+  return { targetUrl: parsed.toString() };
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&#(\d+);/g, (_m, dec) => {
+      const code = Number(dec);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : '';
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : '';
+    })
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/[ \t]+/g, ' ')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&laquo;/gi, '«')
+    .replace(/&raquo;/gi, '»')
+    .replace(/&ndash;/gi, '–')
+    .replace(/&mdash;/gi, '—')
+    .replace(/&hellip;/gi, '…');
+}
+
+function stripTagsToReadableText(fragment: string): string {
+  const withoutScripts = fragment
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<template[\s\S]*?<\/template>/gi, ' ');
+
+  const withBreaks = withoutScripts
+    .replace(/<\/(p|div|h1|h2|h3|h4|h5|h6|li|tr|blockquote|section|article)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+
+  return decodeHtmlEntities(withBreaks)
+    .replace(/[ \t\r]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
     .replace(/\n\s*\n+/g, '\n')
     .trim();
+}
+
+function decodeBufferWithCharset(buffer: Buffer, contentTypeHeader: string): string {
+  const headerCharsetMatch = contentTypeHeader.match(/charset\s*=\s*["']?([a-zA-Z0-9._-]+)/i);
+  const headAscii = buffer.subarray(0, 2048).toString('ascii');
+  const metaCharsetMatch = headAscii.match(/charset\s*=\s*["']?([a-zA-Z0-9._-]+)/i);
+  const charset = (headerCharsetMatch?.[1] || metaCharsetMatch?.[1] || 'utf-8').toLowerCase();
+
+  try {
+    return new TextDecoder(charset, { fatal: false }).decode(buffer);
+  } catch {
+    return buffer.toString('utf8');
+  }
+}
+
+function detectBufferMagicMime(buffer: Buffer): string | null {
+  if (buffer.byteLength >= 5 && buffer.subarray(0, 5).toString('ascii') === '%PDF-') {
+    return 'application/pdf';
+  }
+  if (
+    buffer.byteLength >= 4 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+  if (
+    buffer.byteLength >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return 'image/jpeg';
+  }
+  if (
+    buffer.byteLength >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+function extractMetaContent(html: string, key: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regexA = new RegExp(
+    `<meta[^>]+(?:property|name)=["']${escaped}["'][^>]+content=["']([^"']+)["']`,
+    'i'
+  );
+  const regexB = new RegExp(
+    `<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${escaped}["']`,
+    'i'
+  );
+  const raw = html.match(regexA)?.[1] || html.match(regexB)?.[1] || '';
+  return decodeHtmlEntities(raw).trim();
+}
+
+function extractWebPagePayload(
+  html: string,
+  pageUrl: string,
+  telegramPostPath?: string
+): {
+  title: string;
+  extractedText: string;
+  imageUrls: string[];
+  pdfUrls: string[];
+} {
+  const ogTitle = extractMetaContent(html, 'og:title');
+  const docTitleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const docTitle = docTitleMatch ? decodeHtmlEntities(docTitleMatch[1]).trim() : '';
+  const title = ogTitle || docTitle;
+
+  const imageUrls: string[] = [];
+  const pdfUrls: string[] = [];
+
+  const addResolvedUrl = (targetList: string[], candidate: string) => {
+    try {
+      const resolved = new URL(decodeHtmlEntities(candidate.trim()), pageUrl).toString();
+      if (!targetList.includes(resolved)) targetList.push(resolved);
+    } catch {
+      // Ignore malformed embedded URLs
+    }
+  };
+
+  let parsedPageUrl: URL | null = null;
+  try {
+    parsedPageUrl = new URL(pageUrl);
+  } catch {
+    parsedPageUrl = null;
+  }
+  const isTelegramPage = Boolean(
+    parsedPageUrl &&
+      (parsedPageUrl.hostname.toLowerCase() === 't.me' ||
+        parsedPageUrl.hostname.toLowerCase() === 'telegram.me')
+  );
+
+  if (isTelegramPage) {
+    let scopeHtml = html;
+    if (telegramPostPath) {
+      const marker = `data-post="${telegramPostPath}"`;
+      const markerIdx = html.indexOf(marker);
+      if (markerIdx !== -1) {
+        const nextWrapIdx = html.indexOf('tgme_widget_message_wrap', markerIdx + marker.length);
+        scopeHtml = html.slice(
+          markerIdx,
+          nextWrapIdx !== -1 ? nextWrapIdx : Math.min(html.length, markerIdx + 25000)
+        );
+      }
+    }
+
+    const messageTexts: string[] = [];
+    const msgRegex =
+      /<div[^>]+class="[^"]*tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = msgRegex.exec(scopeHtml)) !== null) {
+      const cleaned = stripTagsToReadableText(m[1]);
+      if (cleaned) messageTexts.push(cleaned);
+    }
+
+    const photoRegex = /tgme_widget_message_photo_wrap[\s\S]{0,400}?background-image:url\('([^']+)'\)/gi;
+    let pm: RegExpExecArray | null;
+    while ((pm = photoRegex.exec(scopeHtml)) !== null) {
+      if (pm[1]) addResolvedUrl(imageUrls, pm[1]);
+    }
+
+    const combinedText = messageTexts.join('\n\n').trim();
+    if (combinedText || imageUrls.length > 0) {
+      return {
+        title,
+        extractedText: combinedText,
+        imageUrls,
+        pdfUrls,
+      };
+    }
+  }
+
+  const ogImage = extractMetaContent(html, 'og:image') || extractMetaContent(html, 'twitter:image');
+  if (ogImage) addResolvedUrl(imageUrls, ogImage);
+
+  const pdfHrefRegex = /href=["']([^"']+\.pdf(?:\?[^"']*)?)["']/gi;
+  let pdfMatch: RegExpExecArray | null;
+  while ((pdfMatch = pdfHrefRegex.exec(html)) !== null) {
+    if (pdfMatch[1]) addResolvedUrl(pdfUrls, pdfMatch[1]);
+  }
+
+  const bodyStrippedLayout = html
+    .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
+    .replace(/<header[\s\S]*?<\/header>/gi, ' ')
+    .replace(/<footer[\s\S]*?<\/footer>/gi, ' ')
+    .replace(/<aside[\s\S]*?<\/aside>/gi, ' ')
+    .replace(/<form[\s\S]*?<\/form>/gi, ' ');
+
+  const articleMatch = bodyStrippedLayout.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+  const mainMatch = bodyStrippedLayout.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  const preferredHtml = articleMatch?.[1] || mainMatch?.[1] || '';
+  const preferredText = preferredHtml ? stripTagsToReadableText(preferredHtml) : '';
+  const fallbackText = stripTagsToReadableText(bodyStrippedLayout);
+
+  const extractedText = preferredText.length >= 80 ? preferredText : fallbackText;
+
+  return {
+    title,
+    extractedText,
+    imageUrls,
+    pdfUrls,
+  };
 }
 
 async function fetchExternalResourceInMemory(rawUrl: string): Promise<{
   finalUrl: string;
   mimeType: string;
+  contentTypeHeader: string;
   buffer: Buffer;
+  telegramPostPath?: string;
 }> {
-  let currentUrl = await assertSafeExternalUrl(rawUrl);
+  const normalized = normalizeExternalUrl(rawUrl);
+  let currentUrl = await assertSafeExternalUrl(normalized.targetUrl);
 
-  for (let redirects = 0; redirects < 4; redirects++) {
+  for (let redirects = 0; redirects < 5; redirects++) {
     const res = await fetch(currentUrl.toString(), {
       method: 'GET',
       redirect: 'manual',
       signal: AbortSignal.timeout(20000),
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; RasaelEmaratiaChildren/1.0)',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        Accept:
+          'text/html,application/xhtml+xml,application/pdf,image/png,image/jpeg,image/webp,text/plain;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
       },
     });
 
@@ -306,21 +663,29 @@ async function fetchExternalResourceInMemory(rawUrl: string): Promise<{
     }
 
     const buffer = Buffer.concat(chunks);
-    const rawMime = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const contentTypeHeader = res.headers.get('content-type') || '';
+    const rawMime = contentTypeHeader.split(';')[0].trim().toLowerCase();
+    const magicMime = detectBufferMagicMime(buffer);
     let mimeType = rawMime;
-    if (!mimeType || mimeType === 'application/octet-stream') {
+
+    if (magicMime) {
+      mimeType = magicMime;
+    } else if (!mimeType || mimeType === 'application/octet-stream') {
       const lowerPath = currentUrl.pathname.toLowerCase();
       if (lowerPath.endsWith('.pdf')) mimeType = 'application/pdf';
       else if (lowerPath.endsWith('.png')) mimeType = 'image/png';
       else if (lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')) mimeType = 'image/jpeg';
       else if (lowerPath.endsWith('.webp')) mimeType = 'image/webp';
+      else if (lowerPath.endsWith('.txt') || lowerPath.endsWith('.md')) mimeType = 'text/plain';
       else mimeType = 'text/html';
     }
 
     return {
       finalUrl: currentUrl.toString(),
       mimeType,
+      contentTypeHeader,
       buffer,
+      telegramPostPath: normalized.telegramPostPath,
     };
   }
 
@@ -331,6 +696,7 @@ async function convertUploadedMaterialWithGemini(params: {
   mimeType?: string;
   base64Data?: string;
   extractedText?: string;
+  sourceTitleHint?: string;
 }): Promise<{
   suggestedTitle: string;
   suggestedSubtitle: string;
@@ -353,29 +719,31 @@ async function convertUploadedMaterialWithGemini(params: {
 
   const systemInstruction = `أنت محول محتوى تعليمي دقيق لمنصة "رسائل إماراتية للأطفال".
 القاعدة الصارمة غير القابلة للتجاوز:
-1. استخرج النصوص الموجودة في المحتوى المرفق (PDF أو صورة أو نص صفحة) كما هي حرفياً دون أي تعديل أو استبدال أو إعادة صياغة أو تلخيص أو إضافة أي كلمة خارجية من عندك أبداً.
-2. كل عنوان، سؤال، إجابة، فقرة، ذكر، أو خيار يجب أن يكون منسوخاً حرفياً من نفس كلمات المحتوى المرفق.
-3. قم بتصنيف النشاط تلقائياً إلى أنسب نمط تفاعلي للأطفال ('flashcards' للأسئلة والأجوبة أو البطاقات، 'quiz' للاختيارات، 'adhkar' للأذكار والأدعية، 'story' للقصص، 'checklist' للنصائح والأنشطة التربوية).
-4. في أسئلة الاختيار (quizQuestions): اجعل نص السؤال والإجابة الصحيحة مأخوذين حرفياً من المحتوى، واختر المشتتات (الخيارات الأخرى) من عبارات حقيقية أخرى داخل نفس المحتوى قدر الإمكان دون تأليف عبارات خارجية.`;
+1. استخرج النصوص والمصطلحات الموجودة في المحتوى المرفق (PDF أو صورة أو رابط صفحة أو منشور) كما هي حرفياً بالكامل دون أي تعديل أو استبدال أو إعادة صياغة أو اختصار أو إضافة أي كلمة أو مصطلح خارجي من عندك أبداً.
+2. كل عنوان، سؤال، إجابة، فقرة، ذكر، مصطلح، أو خيار يجب أن يكون منسوخاً حرفياً من نفس كلمات المصدر دون تغيير.
+3. حول المحتوى بذكاء إلى أنشطة تفاعلية جذابة ومتكاملة للأطفال تشمل كل ما يمكن استخراجه حرفياً من المصدر:
+   - flashcards (بطاقات سؤال وجواب أو مصطلح وشرحه أو فكرة ومضمونها الحرفي).
+   - quizQuestions (أسئلة اختيار من متعدد مستخرجة حرفياً من المصدر، مع جعل الإجابة الصحيحة والمشتتات من عبارات حقيقية أخرى داخل نفس المصدر فقط دون تأليف أي عبارة خارجية).
+   - matchingPairs (أزواج توصيل بين جمل أو أسئلة أو مفاهيم ومقابلاتها الحرفية من نفس المصدر).
+   - sections و verbatimTextBlocks (كامل النصوص والفقرات المذكورة في المصدر مرتبة للعرض التفاعلي والتأشير).
+4. حدد أنسب نمط عرض مبدئي ('flashcards' أو 'quiz' أو 'adhkar' أو 'story' أو 'checklist') بحسب طبيعة النص المستخرج.`;
 
-  const promptText = params.extractedText
-    ? `حلل النص التالي وحوله إلى بنية JSON للأنشطة التفاعلية للأطفال مع الالتزام التام بالنص الحرفي فقط دون أي تغيير أو إضافة خارجية:\n\n${params.extractedText.slice(0, 60000)}`
-    : `حلل الملف المرفق وحوله إلى بنية JSON للأنشطة التفاعلية للأطفال مع الالتزام التام بالنص الحرفي الموجود في الملف فقط دون أي تغيير أو إضافة خارجية.`;
+  const textContext = params.extractedText ? params.extractedText.slice(0, 60000) : '';
+  const titleHintLine = params.sourceTitleHint ? `عنوان الصفحة المصدر: ${params.sourceTitleHint}\n\n` : '';
+  const promptText = textContext
+    ? `حلل المحتوى التالي وحوله إلى بنية JSON للأنشطة التفاعلية للأطفال مع التقيد الحرفي التام بجميع الكلمات والمصطلحات والنصوص الواردة فيه دون إضافة أو تغيير:\n\n${titleHintLine}${textContext}`
+    : `حلل الملف/الصورة المرفقة وحوله إلى بنية JSON للأنشطة التفاعلية للأطفال مع الالتزام التام بالنص الحرفي الموجود فيه فقط دون أي تغيير أو إضافة خارجية.`;
 
-  const parts =
-    params.mimeType && params.base64Data
-      ? [
-          {
-            inlineData: {
-              mimeType: params.mimeType,
-              data: params.base64Data,
-            },
-          },
-          {
-            text: promptText,
-          },
-        ]
-      : [{ text: promptText }];
+  const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
+  if (params.mimeType && params.base64Data) {
+    parts.push({
+      inlineData: {
+        mimeType: params.mimeType,
+        data: params.base64Data,
+      },
+    });
+  }
+  parts.push({ text: promptText });
 
   const response = await ai.models.generateContent({
     model: 'gemini-4-hydrogen',
@@ -388,15 +756,15 @@ async function convertUploadedMaterialWithGemini(params: {
         properties: {
           suggestedTitle: {
             type: Type.STRING,
-            description: 'العنوان الرئيسي المذكور حرفياً داخل الملف.',
+            description: 'العنوان الرئيسي المذكور حرفياً داخل المحتوى.',
           },
           suggestedSubtitle: {
             type: Type.STRING,
-            description: 'العنوان الفرعي أو اسم المؤلف/المصدر المذكور داخل الملف إن وجد، وإلا نص فارغ.',
+            description: 'العنوان الفرعي أو اسم المؤلف/المصدر المذكور داخل المحتوى إن وجد، وإلا نص فارغ.',
           },
           suggestedCategory: {
             type: Type.STRING,
-            description: 'التصنيف المناسب من عناوين الملف مثل العقيدة للأطفال أو فقرة الأنشطة أو أذكار الصباح أو أذكار المساء أو قصص أو #مشكلة وحل.',
+            description: 'التصنيف المناسب من عناوين المحتوى مثل العقيدة للأطفال أو فقرة الأنشطة أو أذكار الصباح أو أذكار المساء أو قصص أو #مشكلة وحل.',
           },
           mode: {
             type: Type.STRING,
@@ -405,7 +773,7 @@ async function convertUploadedMaterialWithGemini(params: {
           verbatimTextBlocks: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: 'كامل النصوص المستخرجة حرفياً من كل صفحة في الملف بالترتيب.',
+            description: 'كامل النصوص المستخرجة حرفياً من المصدر بالترتيب دون حذف أو تغيير.',
           },
           sections: {
             type: Type.ARRAY,
@@ -454,7 +822,7 @@ async function convertUploadedMaterialWithGemini(params: {
           },
           drawingPrompt: {
             type: Type.STRING,
-            description: 'جملة طلب الرسم أو التلوين الحرفية من الملف إن وجدت، وإلا نص فارغ.',
+            description: 'جملة طلب الرسم أو التلوين الحرفية من المصدر إن وجدت، وإلا نص فارغ.',
           },
         },
         required: [
@@ -492,7 +860,7 @@ async function convertUploadedMaterialWithGemini(params: {
   const mode = validModes.has(parsed.mode) ? parsed.mode : 'flashcards';
 
   return {
-    suggestedTitle: parsed.suggestedTitle || 'محتوى مرفوع',
+    suggestedTitle: parsed.suggestedTitle || params.sourceTitleHint || 'محتوى مرفوع',
     suggestedSubtitle: parsed.suggestedSubtitle || '',
     suggestedCategory: parsed.suggestedCategory || 'العقيدة للأطفال',
     smartActivity: {
@@ -524,7 +892,102 @@ async function convertUploadedMaterialWithGemini(params: {
   };
 }
 
-async function startServer(): Promise<void> {
+async function extractImageDragDropTitlesWithGemini(
+  images: Array<{ mimeType: string; base64Data: string; fileName: string }>
+): Promise<{
+  suggestedTitle: string;
+  suggestedCategory: string;
+  titles: string[];
+}> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    throw new Error('مفتاح Gemini غير مهيأ على الخادم (GEMINI_API_KEY).');
+  }
+
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+
+  const parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> = [];
+  images.forEach((img, idx) => {
+    parts.push({ text: `الصورة رقم ${idx + 1} (${img.fileName}):` });
+    parts.push({
+      inlineData: {
+        mimeType: img.mimeType,
+        data: img.base64Data,
+      },
+    });
+  });
+
+  parts.push({
+    text: `استخرج لكل صورة من الصور المرفقة (${images.length} صور) عنواناً قصيراً واضحاً ومناسباً للأطفال ليُستخدم في لعبة سحب وإفلات (مطابقة الصور بالعناوين).
+إذا كان هناك نص أو عنوان مكتوب داخل الصورة فانسخه حرفياً بدقة، وإذا كانت الصورة بدون نص فاكتب عنواناً عربياً قصيراً ومباشراً يصف محتوى الصورة.
+يجب أن يحتوي حقل titles على ${images.length} عناوين بالضبط بنفس ترتيب الصور.`,
+  });
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-4-hydrogen',
+    contents: { parts },
+    config: {
+      systemInstruction:
+        'أنت مساعد تعليمي لمنصة "رسائل إماراتية للأطفال". أعد فقط JSON مطابقاً للمخطط المطلوب وبنفس عدد الصور بالضبط.',
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          suggestedTitle: {
+            type: Type.STRING,
+            description: 'عنوان عام قصير ومناسب للعبة المطابقة.',
+          },
+          suggestedCategory: {
+            type: Type.STRING,
+            description: 'التصنيف المناسب مثل فقرة الأنشطة أو العقيدة للأطفال.',
+          },
+          titles: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'قائمة العناوين المطابقة لكل صورة بنفس الترتيب.',
+          },
+        },
+        required: ['suggestedTitle', 'suggestedCategory', 'titles'],
+      },
+    },
+  });
+
+  const rawText = (response.text || '').trim();
+  if (!rawText) {
+    throw new Error('لم يتم استلام استجابة صالحة من خدمة التحويل الذكي.');
+  }
+
+  const parsed = JSON.parse(rawText) as {
+    suggestedTitle?: string;
+    suggestedCategory?: string;
+    titles?: string[];
+  };
+
+  const rawTitles = Array.isArray(parsed.titles) ? parsed.titles : [];
+  const titles = images.map((img, idx) => {
+    const candidate = typeof rawTitles[idx] === 'string' ? rawTitles[idx].trim() : '';
+    if (candidate) return candidate;
+    const baseName = img.fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    return baseName || `صورة ${idx + 1}`;
+  });
+
+  return {
+    suggestedTitle: parsed.suggestedTitle?.trim() || 'لعبة مطابقة الصور بالعناوين',
+    suggestedCategory: parsed.suggestedCategory?.trim() || 'فقرة الأنشطة',
+    titles,
+  };
+}
+
+export async function createApiApp(options?: {
+  attachFrontend?: boolean;
+}): Promise<express.Express> {
   const app = express();
   app.use(express.json({ limit: '25mb' }));
   app.use('/assets', express.static(path.resolve(PUBLIC_DIR, 'assets')));
@@ -548,7 +1011,31 @@ async function startServer(): Promise<void> {
       authenticated,
       needsSetup,
       mode: envConfigured ? 'env' : 'local-setup',
+      firebaseEnabled: Boolean(FIREBASE_PROJECT_ID),
     });
+  });
+
+  // Exchange verified Firebase Admin Google Sign-In ID token for backend AI-conversion token
+  app.post('/api/auth/firebase-login', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+        idToken?: unknown;
+      };
+      if (typeof body.idToken !== 'string' || !body.idToken.trim()) {
+        res.status(400).json({ error: 'رمز التحقق من Firebase مفقود.' });
+        return;
+      }
+      const adminUser = await verifyFirebaseAdminIdToken(body.idToken.trim());
+      res.json({
+        token: createSessionToken(),
+        authenticated: true,
+        email: adminUser.email,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'تعذر التحقق من حساب الإدارة عبر Firebase.';
+      res.status(401).json({ error: message });
+    }
   });
 
   // First-run setup when ADMIN_PASSCODE env var is unset
@@ -739,6 +1226,104 @@ async function startServer(): Promise<void> {
     }
   });
 
+  // Upload multiple images and convert them into a Drag & Drop matching game (images <-> titles)
+  app.post('/api/admin/convert-images-dragdrop', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+        images?: Array<{ fileName?: unknown; mimeType?: unknown; base64Data?: unknown }>;
+      };
+      const rawImages = Array.isArray(body.images) ? body.images : [];
+      if (rawImages.length === 0 || rawImages.length > 10) {
+        res.status(400).json({ error: 'يرجى رفع صورة واحدة إلى 10 صور كحد أقصى.' });
+        return;
+      }
+
+      const uploaded: Array<{
+        id: string;
+        fileName: string;
+        mimeType: string;
+        base64Data: string;
+        imageUrl: string;
+      }> = [];
+
+      for (let i = 0; i < rawImages.length; i++) {
+        const entry = rawImages[i];
+        const mimeType = typeof entry.mimeType === 'string' ? entry.mimeType : '';
+        if (!mimeType || mimeType === 'application/pdf' || !ALLOWED_MIME_TO_EXT[mimeType]) {
+          res.status(400).json({ error: 'يُسمح فقط برفع صور بصيغة PNG أو JPG أو WEBP.' });
+          return;
+        }
+        const rawBase64 = typeof entry.base64Data === 'string' ? entry.base64Data : '';
+        if (!rawBase64) {
+          res.status(400).json({ error: 'بيانات إحدى الصور مفقودة.' });
+          return;
+        }
+        const cleanBase64 = sanitizeBase64Payload(rawBase64);
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        if (buffer.byteLength === 0 || buffer.byteLength > 10 * 1024 * 1024) {
+          res.status(400).json({ error: 'حجم إحدى الصور يتجاوز الحد المسموح (10 ميجابايت).' });
+          return;
+        }
+
+        const ext = ALLOWED_MIME_TO_EXT[mimeType];
+        const safeFileId = `${Date.now()}-${i}-${crypto.randomBytes(5).toString('hex')}${ext}`;
+        const targetPath = path.resolve(UPLOADS_DIR, safeFileId);
+        if (!targetPath.startsWith(UPLOADS_DIR + path.sep)) {
+          res.status(400).json({ error: 'مسار الملف غير صالح.' });
+          return;
+        }
+        fs.writeFileSync(targetPath, buffer);
+
+        uploaded.push({
+          id: `dd-${Date.now()}-${i}`,
+          fileName:
+            typeof entry.fileName === 'string' && entry.fileName.trim()
+              ? entry.fileName.trim()
+              : safeFileId,
+          mimeType,
+          base64Data: cleanBase64,
+          imageUrl: `/uploads/${safeFileId}`,
+        });
+      }
+
+      const extracted = await extractImageDragDropTitlesWithGemini(
+        uploaded.map((u) => ({
+          mimeType: u.mimeType,
+          base64Data: u.base64Data,
+          fileName: u.fileName,
+        }))
+      );
+
+      const dragDropCards = uploaded.map((u, idx) => ({
+        id: u.id,
+        title: extracted.titles[idx] || `صورة ${idx + 1}`,
+        imageUrl: u.imageUrl,
+      }));
+
+      const smartActivity: SmartConvertedActivity = {
+        mode: 'drag_drop_images',
+        verbatimTextBlocks: dragDropCards.map((c) => c.title),
+        sections: [],
+        flashcards: [],
+        quizQuestions: [],
+        dragDropCards,
+      };
+
+      res.json({
+        suggestedTitle: extracted.suggestedTitle,
+        suggestedCategory: extracted.suggestedCategory,
+        smartActivity,
+      });
+    } catch (err) {
+      console.error('Convert drag & drop images error:', err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'تعذر تحويل الصور إلى لعبة سحب وإفلات حالياً.';
+      res.status(502).json({ error: message });
+    }
+  });
+
   // Convert external URL into an interactive activity strictly in-memory without saving the original file
   app.post('/api/admin/convert-url', requireAdmin, async (req: Request, res: Response) => {
     try {
@@ -748,36 +1333,98 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const fetched = await fetchExternalResourceInMemory(url);
+      const cleanInputUrl = url.trim();
+      const fetched = await fetchExternalResourceInMemory(cleanInputUrl);
       let converted;
+
+      const isTextLikeMime =
+        fetched.mimeType === 'text/plain' ||
+        fetched.mimeType === 'text/markdown' ||
+        fetched.mimeType === 'text/csv' ||
+        fetched.mimeType === 'application/json' ||
+        fetched.mimeType === 'application/xml' ||
+        fetched.mimeType === 'text/xml';
 
       if (ALLOWED_MIME_TO_EXT[fetched.mimeType]) {
         converted = await convertUploadedMaterialWithGemini({
           mimeType: fetched.mimeType,
           base64Data: fetched.buffer.toString('base64'),
         });
-      } else if (
-        fetched.mimeType === 'text/html' ||
-        fetched.mimeType === 'application/xhtml+xml' ||
-        fetched.mimeType === 'text/plain'
-      ) {
-        const rawText = fetched.buffer.toString('utf8');
-        const extractedText =
-          fetched.mimeType === 'text/plain' ? rawText.trim() : extractReadableTextFromHtml(rawText);
+      } else if (isTextLikeMime) {
+        const extractedText = decodeBufferWithCharset(
+          fetched.buffer,
+          fetched.contentTypeHeader
+        ).trim();
         if (!extractedText) {
           res.status(400).json({ error: 'لم يتم العثور على نص قابل للاستخراج في هذا الرابط.' });
           return;
         }
         converted = await convertUploadedMaterialWithGemini({ extractedText });
+      } else if (
+        fetched.mimeType === 'text/html' ||
+        fetched.mimeType === 'application/xhtml+xml'
+      ) {
+        const rawHtml = decodeBufferWithCharset(fetched.buffer, fetched.contentTypeHeader);
+        const pagePayload = extractWebPagePayload(
+          rawHtml,
+          fetched.finalUrl,
+          fetched.telegramPostPath
+        );
+
+        let attachedMime: string | undefined;
+        let attachedBase64: string | undefined;
+
+        // If the webpage is mainly a wrapper around a PDF or Telegram/infographic image, fetch it in-memory
+        if (pagePayload.extractedText.length < 80 && pagePayload.pdfUrls.length > 0) {
+          try {
+            const pdfRes = await fetchExternalResourceInMemory(pagePayload.pdfUrls[0]);
+            if (pdfRes.mimeType === 'application/pdf') {
+              attachedMime = pdfRes.mimeType;
+              attachedBase64 = pdfRes.buffer.toString('base64');
+            }
+          } catch {
+            // Fall through to text/image fallback
+          }
+        }
+
+        if (
+          !attachedBase64 &&
+          (Boolean(fetched.telegramPostPath) || pagePayload.extractedText.length < 120) &&
+          pagePayload.imageUrls.length > 0
+        ) {
+          try {
+            const imgRes = await fetchExternalResourceInMemory(pagePayload.imageUrls[0]);
+            if (ALLOWED_MIME_TO_EXT[imgRes.mimeType] && imgRes.mimeType !== 'application/pdf') {
+              attachedMime = imgRes.mimeType;
+              attachedBase64 = imgRes.buffer.toString('base64');
+            }
+          } catch {
+            // Ignore embedded image fetch failure and proceed with extracted text
+          }
+        }
+
+        if (!pagePayload.extractedText && !attachedBase64) {
+          res.status(400).json({
+            error: 'لم يتم العثور على نص أو محتوى قابل للاستخراج في هذا الرابط.',
+          });
+          return;
+        }
+
+        converted = await convertUploadedMaterialWithGemini({
+          mimeType: attachedMime,
+          base64Data: attachedBase64,
+          extractedText: pagePayload.extractedText || undefined,
+          sourceTitleHint: pagePayload.title || undefined,
+        });
       } else {
         res.status(400).json({
-          error: 'نوع المحتوى في الرابط غير مدعوم. المسموح: PDF أو صور أو صفحات نصية.',
+          error: 'تعذر التعرف على محتوى نصي أو ملف PDF أو صورة في هذا الرابط.',
         });
         return;
       }
 
       res.json({
-        externalLinks: [{ label: fetched.finalUrl, url: fetched.finalUrl }],
+        externalLinks: [{ label: cleanInputUrl, url: cleanInputUrl }],
         ...converted,
       });
     } catch (err) {
@@ -923,28 +1570,36 @@ async function startServer(): Promise<void> {
     res.status(500).json({ error: 'حدث خطأ داخلي في الخادم.' });
   });
 
-  // Vite / Static serving
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer } = await import('vite');
-    const vite = await createServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(distDir, 'index.html'));
-    });
+  if (options?.attachFrontend !== false) {
+    // Vite / Static serving
+    if (process.env.NODE_ENV !== 'production') {
+      const { createServer } = await import('vite');
+      const vite = await createServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distDir = path.resolve(__dirname, 'dist');
+      app.use(express.static(distDir));
+      app.get('*', (_req: Request, res: Response) => {
+        res.sendFile(path.resolve(distDir, 'index.html'));
+      });
+    }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server listening on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  createApiApp({ attachFrontend: true })
+    .then((app) => {
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server listening on http://0.0.0.0:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to start server:', err);
+      process.exit(1);
+    });
+}

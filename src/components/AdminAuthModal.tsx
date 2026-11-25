@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { signInWithPopup, signOut } from 'firebase/auth';
 import { Eye, EyeOff, Lock, RefreshCw, X } from 'lucide-react';
+import { ADMIN_EMAIL, auth, googleProvider } from '../firebase.ts';
 
 interface Props {
-  onSuccess: (token: string) => void;
+  onSuccess: (token: string | null) => void;
   onClose: () => void;
 }
 
@@ -10,6 +12,7 @@ interface AuthStatusResponse {
   authenticated?: boolean;
   needsSetup?: boolean;
   mode?: 'env' | 'local-setup';
+  firebaseEnabled?: boolean;
   error?: string;
 }
 
@@ -32,6 +35,7 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
 
   const loadAuthStatus = useCallback(async () => {
     setStatusError(null);
@@ -48,13 +52,55 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
       setNeedsSetup(Boolean(data.needsSetup));
       setAuthMode(data.mode || null);
     } catch {
-      setStatusError('تعذر الاتصال بالخادم للتحقق من حالة تسجيل الدخول.');
+      setStatusError('تعذر الاتصال بخادم المصادقة المحلي، يمكنك الدخول عبر حساب Google السحابي.');
     }
   }, []);
 
   useEffect(() => {
     void loadAuthStatus();
   }, [loadAuthStatus]);
+
+  const handleGoogleSignIn = async () => {
+    setError(null);
+    setGoogleLoading(true);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const user = cred.user;
+      if (!user.emailVerified || user.email !== ADMIN_EMAIL) {
+        await signOut(auth);
+        setError('هذا الحساب غير مصرح له بإدارة المنصة.');
+        return;
+      }
+
+      const idToken = await user.getIdToken();
+      let backendToken: string | null = null;
+      try {
+        const res = await fetch('/api/auth/firebase-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ idToken }),
+        });
+        const data = await parseJsonSafe<{ token?: string }>(res);
+        if (res.ok && data?.token) {
+          backendToken = data.token;
+        }
+      } catch {
+        // Static hosting fallback: Firebase Auth still grants full Firestore sync
+      }
+
+      onSuccess(backendToken);
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/popup-closed-by-user') {
+        setError('تم إغلاق نافذة تسجيل الدخول.');
+      } else {
+        setError('تعذر تسجيل الدخول عبر حساب Google.');
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,7 +150,7 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
       role="dialog"
       aria-modal="true"
     >
-      <div className="w-full max-w-md rounded-3xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 sm:p-8 text-[var(--platform-text)] shadow-2xl space-y-6">
+      <div className="w-full max-w-md rounded-3xl border border-[var(--platform-border)] bg-[var(--platform-surface)] p-6 sm:p-8 text-[var(--platform-text)] shadow-2xl space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--platform-surface-muted)] text-[var(--platform-accent)]">
@@ -116,12 +162,12 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
               </h2>
               {authMode === 'env' && (
                 <p className="text-xs text-[var(--platform-text-muted)]">
-                  كلمة المرور مهيأة في إعدادات الخادم (ADMIN_PASSCODE).
+                  المزامنة التلقائية عبر Google أو كلمة مرور الخادم.
                 </p>
               )}
               {needsSetup && (
                 <p className="text-xs text-[var(--platform-text-muted)]">
-                  أنشئ كلمة مرور جديدة لإدارة المنصة.
+                  ادخل بحساب Google للمزامنة التلقائية أو أنشئ كلمة مرور.
                 </p>
               )}
             </div>
@@ -136,6 +182,26 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
           </button>
         </div>
 
+        {/* Google / Firebase Cloud Sign-In */}
+        <button
+          type="button"
+          disabled={googleLoading || loading}
+          onClick={() => void handleGoogleSignIn()}
+          className="flex w-full items-center justify-center gap-2.5 rounded-xl border-2 border-[var(--platform-accent)] bg-[var(--platform-surface-muted)] px-4 py-3 text-sm font-extrabold text-[var(--platform-text)] transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          <span>
+            {googleLoading
+              ? 'جاري تسجيل الدخول بحساب Google...'
+              : 'الدخول بحساب Google (مزامنة Firebase و Vercel تلقائياً)'}
+          </span>
+        </button>
+
+        <div className="flex items-center gap-3 text-xs font-bold text-[var(--platform-text-muted)]">
+          <div className="h-px flex-1 bg-[var(--platform-border)]" />
+          <span>أو الدخول بكلمة المرور</span>
+          <div className="h-px flex-1 bg-[var(--platform-border)]" />
+        </div>
+
         {statusError ? (
           <div className="space-y-4">
             <div className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-800">
@@ -148,11 +214,11 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
               style={{ backgroundColor: 'var(--platform-accent)' }}
             >
               <RefreshCw className="w-4 h-4" />
-              <span>إعادة المحاولة</span>
+              <span>إعادة فحص الخادم</span>
             </button>
           </div>
         ) : needsSetup === null ? (
-          <div className="py-8 text-center text-sm text-[var(--platform-text-muted)]">
+          <div className="py-6 text-center text-sm text-[var(--platform-text-muted)]">
             جاري التحقق من الخادم...
           </div>
         ) : (
@@ -169,7 +235,6 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full rounded-xl border border-[var(--platform-border)] bg-[var(--platform-bg)] pl-11 pr-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[var(--platform-accent)]"
-                  autoFocus
                 />
                 <button
                   type="button"
@@ -206,7 +271,7 @@ export const AdminAuthModal: React.FC<Props> = ({ onSuccess, onClose }) => {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || googleLoading}
               className="w-full rounded-xl py-3 text-base font-bold text-white transition-opacity disabled:opacity-50"
               style={{ backgroundColor: 'var(--platform-accent)' }}
             >

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, Eraser, RotateCcw, ArrowRight, ArrowLeft } from 'lucide-react';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 const PAPER_COLORS = ['#0E7490', '#00732F', '#D97706', '#CE1126', '#2563EB', '#EC4899'];
 
@@ -13,8 +14,17 @@ const UAEFlagSVG: React.FC<{ className?: string }> = ({ className = 'w-28 h-16' 
   </svg>
 );
 
-export const AqeedahActivitiesPackView: React.FC = () => {
+interface Props {
+  soundEnabled?: boolean;
+  onComplete?: () => void;
+}
+
+export const AqeedahActivitiesPackView: React.FC<Props> = ({
+  soundEnabled = true,
+  onComplete,
+}) => {
   const [activeIndex, setActiveIndex] = useState(0);
+  const completionFiredRef = useRef(false);
 
   // Activity 1: Mosaic collage
   const [selectedPaperColor, setSelectedPaperColor] = useState(PAPER_COLORS[0]);
@@ -149,8 +159,29 @@ export const AqeedahActivitiesPackView: React.FC = () => {
     'خالقنا ورازقنا وحده.',
   ];
 
+  const allMatchesCorrect = matchingQuestions.every((q) => matches[q.id] === q.correctRight);
+  const [visitedActivities, setVisitedActivities] = useState<Record<number, boolean>>({ 0: true });
+
+  useEffect(() => {
+    setVisitedActivities((prev) => (prev[activeIndex] ? prev : { ...prev, [activeIndex]: true }));
+  }, [activeIndex]);
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    if (allMatchesCorrect || Object.keys(visitedActivities).length === 8) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [allMatchesCorrect, visitedActivities, onComplete]);
+
   const handleRightMatchClick = (ansText: string) => {
     if (!selectedLeft) return;
+    const question = matchingQuestions.find((q) => q.id === selectedLeft);
+    if (question && question.correctRight === ansText) {
+      playSoftChime('success', soundEnabled);
+    } else {
+      playSoftChime('tap', soundEnabled);
+    }
     setMatches((prev) => ({ ...prev, [selectedLeft]: ansText }));
     setSelectedLeft(null);
   };

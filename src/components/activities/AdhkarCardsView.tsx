@@ -1,15 +1,35 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { motion } from 'motion/react';
 import { CheckCircle2, RotateCcw, ArrowRight, ArrowLeft } from 'lucide-react';
 import type { DhikrItem, ThemeMotif } from '../../types/platform.ts';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 interface Props {
   items: DhikrItem[];
   motif: ThemeMotif;
+  soundEnabled?: boolean;
+  onComplete?: () => void;
 }
 
-export const AdhkarCardsView: React.FC<Props> = ({ items, motif }) => {
+export const AdhkarCardsView: React.FC<Props> = ({
+  items,
+  motif,
+  soundEnabled = true,
+  onComplete,
+}) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const completionFiredRef = useRef(false);
+
+  const completedTotal = items.filter((item) => (counts[item.id] ?? 0) >= item.repeatCount).length;
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    if (items.length > 0 && completedTotal === items.length) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [completedTotal, items.length, onComplete]);
 
   if (!items.length) return null;
 
@@ -18,39 +38,57 @@ export const AdhkarCardsView: React.FC<Props> = ({ items, motif }) => {
   const isDone = currentTapCount >= current.repeatCount;
   const isEvening = motif === 'evening';
 
-  const completedTotal = items.filter((item) => (counts[item.id] ?? 0) >= item.repeatCount).length;
-
   const handleTap = () => {
     if (isDone) return;
     const nextVal = currentTapCount + 1;
+    if (nextVal >= current.repeatCount) {
+      playSoftChime('success', soundEnabled);
+    } else {
+      playSoftChime('tap', soundEnabled);
+    }
     setCounts((prev) => ({ ...prev, [current.id]: nextVal }));
   };
 
   const handleResetAll = () => {
     setCounts({});
     setCurrentIndex(0);
+    completionFiredRef.current = false;
   };
 
   return (
     <div className="space-y-6">
       {/* Progress Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--platform-border)] pb-4">
-        <div className="text-sm font-bold text-[var(--platform-text-muted)] tabular-nums">
-          {completedTotal} / {items.length}
+      <div className="space-y-3 border-b border-[var(--platform-border)] pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="text-sm font-bold text-[var(--platform-text-muted)] tabular-nums">
+            {completedTotal} / {items.length}
+          </div>
+          <button
+            type="button"
+            onClick={handleResetAll}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--platform-border)] px-3 py-1.5 text-xs font-semibold hover:opacity-80"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>إعادة</span>
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={handleResetAll}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--platform-border)] px-3 py-1.5 text-xs font-semibold hover:opacity-80"
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
-          <span>إعادة</span>
-        </button>
+        <div className="h-2.5 w-full overflow-hidden rounded-full bg-[var(--platform-surface-muted)]">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${
+              isEvening ? 'bg-[#F59E0B]' : 'bg-[#0E7490]'
+            }`}
+            style={{ width: `${Math.round((completedTotal / items.length) * 100)}%` }}
+          />
+        </div>
       </div>
 
       {/* Main Card Styled After Morning/Evening PDFs */}
-      <div
-        className={`mx-auto max-w-2xl rounded-3xl border-2 p-7 sm:p-10 text-center space-y-6 transition-colors ${
+      <motion.div
+        key={current.id}
+        initial={{ opacity: 0.78, scale: 0.985 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.2 }}
+        className={`mx-auto max-w-2xl rounded-3xl border-2 p-7 sm:p-10 text-center space-y-6 shadow-sm transition-colors ${
           isEvening
             ? 'border-[#FBBF24]/50 bg-[#1E3A5F] text-white'
             : 'border-[#0284C7]/30 bg-[#F0F9FF] text-slate-900'
@@ -98,7 +136,7 @@ export const AdhkarCardsView: React.FC<Props> = ({ items, motif }) => {
           <button
             type="button"
             onClick={handleTap}
-            className={`inline-flex items-center justify-center gap-3 rounded-2xl px-8 py-4 text-lg font-extrabold tabular-nums transition-transform active:scale-95 ${
+            className={`inline-flex items-center justify-center gap-3 rounded-2xl px-8 py-4 text-lg font-extrabold tabular-nums shadow-sm transition-transform active:scale-95 ${
               isDone
                 ? 'bg-emerald-600 text-white'
                 : isEvening
@@ -112,7 +150,7 @@ export const AdhkarCardsView: React.FC<Props> = ({ items, motif }) => {
             </span>
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Prev / Next Navigation */}
       <div className="flex items-center justify-between gap-4">

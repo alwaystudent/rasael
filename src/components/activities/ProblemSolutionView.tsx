@@ -1,14 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Clock, RotateCcw, X } from 'lucide-react';
 import type { ProblemSolutionData } from '../../types/platform.ts';
+import { playSoftChime } from '../../services/rewardsStorage.ts';
 
 interface Props {
   data: ProblemSolutionData;
+  soundEnabled?: boolean;
+  onComplete?: () => void;
 }
 
-export const ProblemSolutionView: React.FC<Props> = ({ data }) => {
+export const ProblemSolutionView: React.FC<Props> = ({
+  data,
+  soundEnabled = true,
+  onComplete,
+}) => {
   const [tab, setTab] = useState<'guide' | 'sorting' | 'checklist'>('guide');
   const [checkedSolutions, setCheckedSolutions] = useState<Record<number, boolean>>({});
+  const completionFiredRef = useRef(false);
 
   const sortingCards = useMemo(
     () => [
@@ -31,13 +39,26 @@ export const ProblemSolutionView: React.FC<Props> = ({ data }) => {
   const [sortScore, setSortScore] = useState(0);
   const [sortDone, setSortDone] = useState(false);
 
+  const checkedCount = Object.values(checkedSolutions).filter(Boolean).length;
+
+  useEffect(() => {
+    if (completionFiredRef.current) return;
+    if (sortDone || (data.solutionPoints.length > 0 && checkedCount === data.solutionPoints.length)) {
+      completionFiredRef.current = true;
+      onComplete?.();
+    }
+  }, [sortDone, checkedCount, data.solutionPoints.length, onComplete]);
+
   const currentSortCard = sortingCards[sortIdx];
 
   const handleSortChoice = (choice: 'mistakes' | 'solution') => {
     if (sortFeedback !== null) return;
     const isCorrect = currentSortCard.group === choice;
     setSortFeedback(isCorrect ? 'correct' : 'wrong');
-    if (isCorrect) setSortScore((s) => s + 1);
+    if (isCorrect) {
+      playSoftChime('success', soundEnabled);
+      setSortScore((s) => s + 1);
+    }
     setTimeout(() => {
       setSortFeedback(null);
       if (sortIdx + 1 < sortingCards.length) {
