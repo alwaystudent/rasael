@@ -140,8 +140,15 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 }
 
 function isEnvPasscodeConfigured(): boolean {
-  const envPass = process.env.ADMIN_PASSCODE;
-  return typeof envPass === 'string' && envPass.trim().length > 0;
+  const envPass = (process.env.ADMIN_PASSCODE || '').trim();
+  if (!envPass) return false;
+  const placeholders = new Set([
+    'MY_ADMIN_PASSCODE',
+    'ADMIN_PASSCODE',
+    'CHANGE_ME',
+    'YOUR_ADMIN_PASSCODE',
+  ]);
+  return !placeholders.has(envPass);
 }
 
 const ALLOWED_MIME_TO_EXT: Record<string, string> = {
@@ -523,6 +530,13 @@ async function startServer(): Promise<void> {
   app.use('/assets', express.static(path.resolve(PUBLIC_DIR, 'assets')));
   app.use('/uploads', express.static(UPLOADS_DIR));
 
+  // Never cache API responses
+  app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    next();
+  });
+
   // Auth status
   app.get('/api/auth/status', (req: Request, res: Response) => {
     const token = extractBearerToken(req);
@@ -543,7 +557,10 @@ async function startServer(): Promise<void> {
       res.status(403).json({ error: 'تم إعداد كلمة مرور الإدارة مسبقاً.' });
       return;
     }
-    const { password } = req.body as { password?: unknown };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      password?: unknown;
+    };
+    const { password } = body;
     if (typeof password !== 'string' || password.trim().length < 6) {
       res.status(400).json({ error: 'يجب أن تتكون كلمة المرور من 6 أحرف على الأقل.' });
       return;
@@ -561,7 +578,10 @@ async function startServer(): Promise<void> {
 
   // Admin Login
   app.post('/api/auth/login', (req: Request, res: Response) => {
-    const { password } = req.body as { password?: unknown };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      password?: unknown;
+    };
+    const { password } = body;
     if (typeof password !== 'string' || password.length === 0) {
       res.status(400).json({ error: 'يرجى إدخال كلمة المرور.' });
       return;
@@ -613,7 +633,7 @@ async function startServer(): Promise<void> {
 
   // Update appearance & layout configuration
   app.put('/api/admin/appearance', requireAdmin, (req: Request, res: Response) => {
-    const body = req.body as Partial<AppearanceConfig>;
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Partial<AppearanceConfig>;
     const store = readStore();
     const validThemes = new Set(['daylight', 'ocean', 'evening', 'emirati']);
     const validViewModes = new Set(['grid', 'list']);
@@ -770,7 +790,7 @@ async function startServer(): Promise<void> {
 
   // Create new material
   app.post('/api/admin/materials', requireAdmin, (req: Request, res: Response) => {
-    const payload = req.body as Partial<MaterialItem>;
+    const payload = (req.body && typeof req.body === 'object' ? req.body : {}) as Partial<MaterialItem>;
     if (!payload.title || typeof payload.title !== 'string') {
       res.status(400).json({ error: 'عنوان المادة مطلوب.' });
       return;
@@ -816,7 +836,7 @@ async function startServer(): Promise<void> {
   // Update existing material
   app.put('/api/admin/materials/:id', requireAdmin, (req: Request, res: Response) => {
     const id = String(req.params.id);
-    const payload = req.body as Partial<MaterialItem>;
+    const payload = (req.body && typeof req.body === 'object' ? req.body : {}) as Partial<MaterialItem>;
     const store = readStore();
     const idx = store.materials.findIndex((m) => m.id === id);
     if (idx === -1) {
@@ -838,7 +858,10 @@ async function startServer(): Promise<void> {
 
   // Reorder materials
   app.put('/api/admin/materials-order', requireAdmin, (req: Request, res: Response) => {
-    const { orderedIds } = req.body as { orderedIds?: unknown };
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
+      orderedIds?: unknown;
+    };
+    const { orderedIds } = body;
     if (!Array.isArray(orderedIds)) {
       res.status(400).json({ error: 'قائمة الترتيب غير صالحة.' });
       return;
@@ -883,6 +906,21 @@ async function startServer(): Promise<void> {
 
     writeStore(store);
     res.json({ deletedId: id });
+  });
+
+  // Ensure unknown /api/* paths always return JSON instead of HTML
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'نقطة النهاية غير موجودة.' });
+  });
+
+  // Ensure /api/* errors always return JSON (including malformed JSON payloads)
+  app.use('/api', (err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('API error:', err);
+    if (err instanceof SyntaxError && 'body' in err) {
+      res.status(400).json({ error: 'صيغة البيانات المرسلة غير صالحة.' });
+      return;
+    }
+    res.status(500).json({ error: 'حدث خطأ داخلي في الخادم.' });
   });
 
   // Vite / Static serving

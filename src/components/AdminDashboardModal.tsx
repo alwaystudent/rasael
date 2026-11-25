@@ -38,6 +38,16 @@ interface Props {
 
 const ACCENT_SWATCHES = ['#0E7490', '#00732F', '#CE1126', '#D97706', '#1E3A8A', '#9A3412'];
 
+async function parseJsonSafe<T>(res: Response): Promise<T | null> {
+  try {
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
 export const AdminDashboardModal: React.FC<Props> = ({
   token,
   appearance,
@@ -100,7 +110,7 @@ export const AdminDashboardModal: React.FC<Props> = ({
         }),
       });
 
-      const data = (await res.json()) as {
+      const data = await parseJsonSafe<{
         error?: string;
         sourceUrl?: string;
         sourceMimeType?: string;
@@ -109,10 +119,15 @@ export const AdminDashboardModal: React.FC<Props> = ({
         suggestedSubtitle?: string;
         suggestedCategory?: string;
         smartActivity?: SmartConvertedActivity;
-      };
+      }>(res);
 
-      if (!res.ok) {
-        setErrorMessage(data.error || 'تعذر تحويل الملف.');
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
+
+      if (!res.ok || !data) {
+        setErrorMessage(data?.error || `تعذر تحويل الملف (رمز الحالة: ${res.status}).`);
         return;
       }
 
@@ -153,17 +168,22 @@ export const AdminDashboardModal: React.FC<Props> = ({
         body: JSON.stringify({ url }),
       });
 
-      const data = (await res.json()) as {
+      const data = await parseJsonSafe<{
         error?: string;
         externalLinks?: { label: string; url: string }[];
         suggestedTitle?: string;
         suggestedSubtitle?: string;
         suggestedCategory?: string;
         smartActivity?: SmartConvertedActivity;
-      };
+      }>(res);
 
-      if (!res.ok) {
-        setErrorMessage(data.error || 'تعذر تحويل الرابط الخارجي.');
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
+
+      if (!res.ok || !data) {
+        setErrorMessage(data?.error || `تعذر تحويل الرابط الخارجي (رمز الحالة: ${res.status}).`);
         return;
       }
 
@@ -197,9 +217,13 @@ export const AdminDashboardModal: React.FC<Props> = ({
         headers: authHeaders,
         body: JSON.stringify(draftMaterial),
       });
-      const data = (await res.json()) as { error?: string };
+      const data = await parseJsonSafe<{ error?: string }>(res);
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
       if (!res.ok) {
-        setErrorMessage(data.error || 'تعذر نشر المحتوى.');
+        setErrorMessage(data?.error || `تعذر نشر المحتوى (رمز الحالة: ${res.status}).`);
         return;
       }
       setDraftMaterial(null);
@@ -219,9 +243,13 @@ export const AdminDashboardModal: React.FC<Props> = ({
         headers: authHeaders,
         body: JSON.stringify(editingMaterial),
       });
-      const data = (await res.json()) as { error?: string };
+      const data = await parseJsonSafe<{ error?: string }>(res);
+      if (res.status === 401) {
+        onLogout();
+        return;
+      }
       if (!res.ok) {
-        setErrorMessage(data.error || 'تعذر تحديث المحتوى.');
+        setErrorMessage(data?.error || `تعذر تحديث المحتوى (رمز الحالة: ${res.status}).`);
         return;
       }
       setEditingMaterial(null);
