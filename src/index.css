@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --platform-bg: #F2FAFE;
+    --platform-surface: #FFFFFF;
+    --platform-surface-muted: #E6F4FA;
+    --platform-hero-bg: linear-gradient(135deg, #E0F2FE 0%, #FEF9E7 55%, #ECFDF5 100%);
+    --platform-border: rgba(14, 116, 144, 0.14);
+    --platform-text: #132A3E;
+    --platform-text-muted: #47627A;
+    --platform-accent: #0284C7;
+  }
+
+  html[data-theme="daylight"] {
+    --platform-bg: #F2FAFE;
+    --platform-surface: #FFFFFF;
+    --platform-surface-muted: #E6F4FA;
+    --platform-hero-bg: linear-gradient(135deg, #E0F2FE 0%, #FEF9E7 55%, #ECFDF5 100%);
+    --platform-border: rgba(14, 116, 144, 0.14);
+    --platform-text: #132A3E;
+    --platform-text-muted: #47627A;
+  }
+
+  html[data-theme="ocean"] {
+    --platform-bg: #ECFAFD;
+    --platform-surface: #FFFFFF;
+    --platform-surface-muted: #D8F3FA;
+    --platform-hero-bg: linear-gradient(135deg, #CFFAFE 0%, #E0F2FE 60%, #F0FDF4 100%);
+    --platform-border: rgba(8, 145, 178, 0.16);
+    --platform-text: #0B2B3A;
+    --platform-text-muted: #3A6073;
+  }
+
+  html[data-theme="evening"] {
+    --platform-bg: #13284A;
+    --platform-surface: #1B3763;
+    --platform-surface-muted: #24457A;
+    --platform-hero-bg: linear-gradient(135deg, #1E3A5F 0%, #172E52 60%, #0F2342 100%);
+    --platform-border: rgba(253, 224, 71, 0.22);
+    --platform-text: #F8FAFC;
+    --platform-text-muted: #CBD5E1;
+  }
+
+  html[data-theme="emirati"] {
+    --platform-bg: #F5FAF6;
+    --platform-surface: #FFFFFF;
+    --platform-surface-muted: #E8F5EB;
+    --platform-hero-bg: linear-gradient(135deg, #ECFDF5 0%, #FEF3C7 55%, #FFF1F2 100%);
+    --platform-border: rgba(0, 115, 47, 0.16);
+    --platform-text: #17251E;
+    --platform-text-muted: #435B4D;
+  }
+
+  body {
+    font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+    background-color: var(--platform-bg);
+    color: var(--platform-text);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+.font-amiri {
+  font-family: 'Amiri', serif;
+}
+
+.font-cairo {
+  font-family: 'Cairo', sans-serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
